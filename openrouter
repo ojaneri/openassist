@@ -8,11 +8,13 @@ import readline
 import subprocess
 import threading
 import time
+import re
 
 # Configurações iniciais
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
 SESSION_FILE = "SESSION.md"
 CONFIG_FILE = os.path.expanduser("~/.openrouter.cfg")
+MODEL_CONFIG_FILE = os.path.expanduser("~/.openrouter_model.cfg")
 DEFAULT_MODEL = "qwen/qwen3-coder:free"
 
 FALLBACK_MODELS = [
@@ -23,6 +25,13 @@ FALLBACK_MODELS = [
     "google/gemma-3-27b-it:free",
     "openrouter/free"
 ]
+
+# Comandos que são considerados destrutivos e precisam confirmação extra
+DESTRUCTIVE_COMMANDS = {
+    'rm', 'rmdir', 'dd', 'mkfs', 'fdisk', 'parted', 
+    'shred', 'wipefs', 'chmod', 'chown', 'kill', 'killall',
+    'shutdown', 'reboot', 'halt', 'poweroff'
+}
 
 if not API_KEY:
     print("Erro: OPENROUTER_API_KEY não definida.")
@@ -35,9 +44,29 @@ if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         allowed_commands = set(line.strip() for line in f if line.strip())
 
+# Carrega o modelo que funcionou anteriormente
+def load_working_model():
+    """Carrega o último modelo que funcionou com sucesso."""
+    if os.path.exists(MODEL_CONFIG_FILE):
+        try:
+            with open(MODEL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                saved_model = f.read().strip()
+                if saved_model:
+                    return saved_model
+        except:
+            pass
+    return DEFAULT_MODEL
+
+def save_working_model(model):
+    """Salva o modelo que está funcionando."""
+    try:
+        with open(MODEL_CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.write(model)
+    except:
+        pass
+
 args = sys.argv[1:]
-# Memória de modelo ativo para a sessão (Sticky Model)
-active_model = DEFAULT_MODEL
+active_model = load_working_model()
 initial_prompt = ""
 
 if args:
@@ -50,17 +79,39 @@ if args:
 SYSTEM_PROMPT = """Você é um agente autônomo de administração Linux executando em um loop de automação.
 Sua tarefa é resolver a solicitação do usuário passo a passo usando comandos de terminal.
 
-REGRAS ESTRITAS DE COMPORTAMENTO:
-1. Se você precisa investigar, alterar arquivos ou executar qualquer ação, retorne APENAS os comandos Bash, um por linha.
-2. NÃO use formatação markdown (sem ```bash). NÃO adicione explicações de texto antes ou depois dos comandos. APENAS os comandos crus.
-3. O sistema executará o seu comando no terminal host e devolverá o resultado (stdout/stderr) para você na próxima mensagem.
-4. Analise a saída devolvida. Se precisar de mais comandos, envie o próximo.
-5. Quando a tarefa solicitada pelo usuário estiver 100% concluída ou se você esgotar as possibilidades, você DEVE iniciar sua resposta com a palavra exata "SUMMARY:" seguida de uma explicação humana detalhando tudo o que foi feito e os resultados finais.
+FORMATO DE RESPOSTA OBRIGATÓRIO:
 
-IMPORTANTE: 
-- Para comandos complexos ou pipelines, sempre use uma única linha.
-- Seja eficiente: use comandos que retornem resultados diretos.
-- Se um comando falhar, analise o erro e tente uma alternativa."""
+Retorne APENAS UM comando por vez em formato JSON válido:
+
+{
+  "command": "comando bash aqui",
+  "explanation": "breve explicação do que o comando faz",
+  "reason": "por que este passo é necessário"
+}
+
+Quando a tarefa estiver 100% concluída, retorne:
+
+{
+  "status": "SUMMARY",
+  "message": "Explicação detalhada do que foi feito e resultados finais"
+}
+
+REGRAS ESTRITAS:
+1. APENAS um comando por resposta
+2. SEMPRE em formato JSON válido
+3. NÃO use markdown (sem ```json ou ```)
+4. NÃO adicione texto antes ou depois do JSON
+5. Para comandos complexos, use pipelines em uma única linha
+6. O sistema executará o comando e retornará o output (stdout/stderr)
+7. Analise o output devolvido antes de enviar o próximo comando
+8. Se um comando falhar, analise o erro e tente uma alternativa
+9. Seja eficiente: use comandos que retornem resultados diretos
+
+IMPORTANTE:
+- Um comando = uma resposta JSON
+- Aguarde o output antes de decidir o próximo passo
+- Quando completar o objetivo, envie o JSON com status "SUMMARY"
+"""
 
 def load_session():
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -90,41 +141,68 @@ def call_openrouter(messages):
         "X-Title": "Linux Sysadmin Agent"
     }
     
-    # Coloca o modelo ativo atual no topo, seguido pelos outros fallbacks
-    models_to_try = [active_model]
-    for m in FALLBACK_MODELS:
-        if m not in models_to_try:
-            models_to_try.append(m)
-            
+    # PRIMEIRO: Tenta apenas o modelo ativo (que funcionou antes)
+    data = {"model": active_model, "messages": messages}
+    req = urllib.request.Request(url, headers=headers, data=json.dumps(data).encode("utf-8"))
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            save_working_model(active_model)
+            return result["choices"][0]["message"]["content"], active_model
+    except urllib.error.HTTPError as e:
+        sys.stdout.write("\r\033[2K")
+        try:
+            error_body = e.read().decode("utf-8")
+            error_data = json.loads(error_body)
+            error_msg = error_data.get('error', {}).get('message', 'Erro desconhecido')
+            print(f"\033[93m⚠ Modelo atual ({active_model}) falhou: {error_msg}\033[0m")
+            print(f"\033[96m🔄 Testando modelos alternativos...\033[0m")
+        except:
+            print(f"\033[93m⚠ Modelo atual ({active_model}) falhou (HTTP {e.code})\033[0m")
+            print(f"\033[96m🔄 Testando modelos alternativos...\033[0m")
+    except urllib.error.URLError as e:
+        sys.stdout.write("\r\033[2K")
+        print(f"\033[93m⚠ Modelo atual ({active_model}): Erro de conexão - {str(e.reason)}\033[0m")
+        print(f"\033[96m🔄 Testando modelos alternativos...\033[0m")
+    except Exception as e:
+        sys.stdout.write("\r\033[2K")
+        print(f"\033[91m⚠ Modelo atual ({active_model}): {str(e)}\033[0m")
+        print(f"\033[96m🔄 Testando modelos alternativos...\033[0m")
+    
+    # SEGUNDO: Se o modelo ativo falhou, tenta os fallbacks
     last_error = None
-    for current_model in models_to_try:
+    for current_model in FALLBACK_MODELS:
+        if current_model == active_model:
+            continue
+            
         data = {"model": current_model, "messages": messages}
         req = urllib.request.Request(url, headers=headers, data=json.dumps(data).encode("utf-8"))
+        
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 result = json.loads(response.read().decode("utf-8"))
-                active_model = current_model  # Salva o modelo que deu certo
+                active_model = current_model
+                save_working_model(active_model)
+                print(f"\033[92m✓ Novo modelo ativo salvo: {active_model}\033[0m")
                 return result["choices"][0]["message"]["content"], current_model
         except urllib.error.HTTPError as e:
-            sys.stdout.write("\r\033[2K")
             try:
                 error_body = e.read().decode("utf-8")
                 error_data = json.loads(error_body)
                 error_msg = error_data.get('error', {}).get('message', 'Erro desconhecido')
-                print(f"\033[93m[Aviso] {current_model} falhou ({e.code}): {error_msg}\033[0m")
+                print(f"\033[90m  ↳ {current_model}: {error_msg}\033[0m")
                 last_error = f"{current_model}: {error_msg}"
             except:
-                print(f"\033[93m[Aviso] {current_model} falhou ({e.code}). Tentando próximo...\033[0m")
+                print(f"\033[90m  ↳ {current_model}: HTTP {e.code}\033[0m")
                 last_error = f"{current_model}: HTTP {e.code}"
             continue
         except urllib.error.URLError as e:
-            sys.stdout.write("\r\033[2K")
-            print(f"\033[93m[Aviso] {current_model}: Erro de conexão - {str(e.reason)}\033[0m")
+            print(f"\033[90m  ↳ {current_model}: {str(e.reason)}\033[0m")
             last_error = f"{current_model}: {str(e.reason)}"
             continue
         except Exception as e:
-            sys.stdout.write("\r\033[2K")
-            print(f"\033[91m[Erro] {current_model}: {str(e)}\033[0m")
+            print(f"\033[90m  ↳ {current_model}: {str(e)}\033[0m")
             last_error = f"{current_model}: {str(e)}"
             continue
             
@@ -149,10 +227,100 @@ def call_openrouter_with_spinner(messages):
         time.sleep(0.1)
         
     t.join()
-    sys.stdout.write("\r\033[2K")  # Limpa a linha do spinner quando termina
+    sys.stdout.write("\r\033[2K")
     return result_container.get('data', ("[Erro Interno da Thread]", None))
 
+def parse_json_response(response_text):
+    """Extrai e parseia JSON da resposta, removendo markdown se necessário."""
+    clean_text = response_text.strip()
+    
+    # Remove markdown code blocks se existirem
+    if clean_text.startswith("```json"):
+        clean_text = clean_text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif clean_text.startswith("```"):
+        clean_text = clean_text.split("```", 1)[1].split("```", 1)[0].strip()
+    
+    try:
+        return json.loads(clean_text)
+    except json.JSONDecodeError as e:
+        # Tenta encontrar JSON no texto
+        json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except:
+                pass
+        return None
+
+def is_destructive_command(command):
+    """Verifica se o comando é potencialmente destrutivo."""
+    base_cmd = command.split()[0] if command.strip() else ""
+    
+    # Verifica comando base
+    if base_cmd in DESTRUCTIVE_COMMANDS:
+        return True
+    
+    # Verifica padrões perigosos
+    dangerous_patterns = [
+        r'rm\s+-rf\s+/',
+        r'chmod\s+777',
+        r'chown\s+.*\s+/',
+        r'dd\s+.*of=',
+        r'>\s*/dev/',
+        r'mkfs\.',
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, command):
+            return True
+    
+    return False
+
+def display_command(cmd_data, step_num=None, total_steps=None):
+    """Exibe o comando formatado com explicação."""
+    print(f"\n\033[96m{'='*60}\033[0m")
+    
+    if step_num and total_steps:
+        print(f"\033[96m📍 Passo {step_num}/{total_steps}\033[0m")
+    elif step_num:
+        print(f"\033[96m📍 Passo {step_num}\033[0m")
+    
+    print(f"\033[92m💡 {cmd_data.get('explanation', 'Executando comando...')}\033[0m")
+    
+    if 'reason' in cmd_data and cmd_data['reason']:
+        print(f"\033[90m❓ {cmd_data['reason']}\033[0m")
+    
+    print(f"\033[96m{'='*60}\033[0m")
+    print(f"\n\033[93m┌─ Comando:\033[0m")
+    print(f"\033[93m│ {cmd_data['command']}\033[0m")
+    print(f"\033[93m└─\033[0m\n")
+
+def display_output(output, success=True):
+    """Mostra output do comando para o usuário."""
+    icon = "✓" if success else "✗"
+    color = "\033[92m" if success else "\033[91m"
+    
+    print(f"\n{color}┌─ Resultado: [{icon}]\033[0m")
+    
+    if not output.strip():
+        print(f"{color}│ [Comando executado sem saída no terminal]\033[0m")
+    else:
+        # Limita output exibido a 50 linhas
+        lines = output.split('\n')
+        display_lines = lines[:50]
+        
+        for line in display_lines:
+            print(f"{color}│ {line}\033[0m")
+        
+        if len(lines) > 50:
+            remaining = len(lines) - 50
+            print(f"{color}│ ... [{remaining} linhas restantes omitidas]\033[0m")
+    
+    print(f"{color}└─\033[0m\n")
+
 def process_command(user_input):
+    global active_model
+    
     if user_input == "/clear":
         if os.path.exists(SESSION_FILE):
             os.remove(SESSION_FILE)
@@ -163,10 +331,11 @@ def process_command(user_input):
         sys.exit(0)
     elif user_input == "/help":
         print("\n\033[96m=== COMANDOS DISPONÍVEIS ===\033[0m")
-        print("/clear  - Limpa o histórico da sessão")
-        print("/exit   - Sai do programa")
-        print("/help   - Mostra esta ajuda")
-        print("/status - Mostra status da sessão")
+        print("/clear      - Limpa o histórico da sessão")
+        print("/exit       - Sai do programa")
+        print("/help       - Mostra esta ajuda")
+        print("/status     - Mostra status da sessão")
+        print("/resetmodel - Reseta o modelo salvo para o padrão")
         print("\n\033[96m=== WHITELIST ===\033[0m")
         if allowed_commands:
             print(f"Comandos auto-permitidos: {', '.join(sorted(allowed_commands))}")
@@ -175,18 +344,27 @@ def process_command(user_input):
         print(f"Arquivo: {CONFIG_FILE}\n")
         return "_skip_"
     elif user_input == "/status":
-        msg_count = len(load_session()) - 1  # -1 para não contar o system prompt
+        msg_count = len(load_session()) - 1
+        model_source = "✓ salvo" if os.path.exists(MODEL_CONFIG_FILE) else "padrão"
         print(f"\n\033[96m=== STATUS ===\033[0m")
-        print(f"Modelo ativo: {active_model}")
+        print(f"Modelo ativo: {active_model} ({model_source})")
         print(f"Mensagens na sessão: {msg_count}")
         print(f"Comandos na whitelist: {len(allowed_commands)}")
-        print(f"Arquivo de sessão: {SESSION_FILE}\n")
+        print(f"Arquivo de sessão: {SESSION_FILE}")
+        print(f"Arquivo de modelo: {MODEL_CONFIG_FILE}\n")
+        return "_skip_"
+    elif user_input == "/resetmodel":
+        if os.path.exists(MODEL_CONFIG_FILE):
+            os.remove(MODEL_CONFIG_FILE)
+        active_model = DEFAULT_MODEL
+        print(f"\033[92m✓ Modelo resetado para o padrão: {DEFAULT_MODEL}\033[0m")
+        print(f"\033[90m  (Na próxima chamada bem-sucedida, o novo modelo será salvo)\033[0m\n")
         return "_skip_"
     return user_input
 
 def handle_turn(user_text):
     save_to_session("user", user_text)
-    max_iterations = 20  # Limite de segurança para evitar loops infinitos
+    max_iterations = 30  # Aumentado para permitir mais passos
     iteration = 0
     
     while iteration < max_iterations:
@@ -200,94 +378,130 @@ def handle_turn(user_text):
             print("\033[93mDica: Verifique sua conexão e se a API_KEY está correta.\033[0m")
             break
 
-        clean_response = response_content.strip()
+        # Parseia JSON
+        cmd_data = parse_json_response(response_content)
         
-        # Filtro Markdown aprimorado
-        if clean_response.startswith("```bash"):
-            clean_response = clean_response.split("```bash", 1)[1].split("```", 1)[0].strip()
-        elif clean_response.startswith("```sh"):
-            clean_response = clean_response.split("```sh", 1)[1].split("```", 1)[0].strip()
-        elif clean_response.startswith("```"):
-            clean_response = clean_response.split("```", 1)[1].split("```", 1)[0].strip()
+        if not cmd_data:
+            print("\033[91m❌ Erro: IA não retornou JSON válido.\033[0m")
+            print(f"\033[90mResposta recebida:\033[0m\n{response_content[:500]}\n")
+            save_to_session("assistant", response_content)
+            save_to_session("user", "ERRO: Sua resposta não está em formato JSON válido. Corrija e retorne apenas o JSON conforme especificado no system prompt.")
+            continue
 
-        if clean_response.startswith("SUMMARY:"):
-            final_text = clean_response.replace("SUMMARY:", "", 1).strip()
+        # Verifica se é SUMMARY (tarefa concluída)
+        if cmd_data.get("status") == "SUMMARY":
+            message = cmd_data.get("message", "Tarefa concluída.")
             print(f"\n\033[92m{'='*60}\033[0m")
             print(f"\033[92m✅ TAREFA CONCLUÍDA (via {successful_model})\033[0m")
             print(f"\033[92m{'='*60}\033[0m")
-            print(f"\n{final_text}\n")
+            print(f"\n{message}\n")
             print(f"\033[92m{'='*60}\033[0m\n")
             save_to_session("assistant", response_content)
             break
-            
-        else:
-            # Pega o primeiro termo do comando para a whitelist
-            base_command = clean_response.split()[0] if clean_response.strip() else ""
-            
-            print(f"\n\033[96m┌─ Comando sugerido por {successful_model}\033[0m")
-            print(f"\033[96m│\033[0m")
-            print(f"\033[93m│ {clean_response}\033[0m")
-            print(f"\033[96m└─\033[0m")
-            
-            # Verifica se o comando já está na whitelist
-            if base_command in allowed_commands:
-                print(f"\033[92m✓ Auto-permitido: '{base_command}'\033[0m")
-                confirm = 'enter'
-            else:
-                print(f"\n\033[95m❓ Executar este comando?\033[0m")
-                print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir '{base_command}'")
-                confirm = input("\033[95m➜ \033[0m").strip().lower()
-            
-            if confirm == 'n':
-                print("\033[91m⚠ Comando abortado pelo usuário.\033[0m")
-                save_to_session("assistant", response_content)
-                save_to_session("user", "O usuário abortou este comando. Forneça uma alternativa ou finalize com SUMMARY:.")
-                continue
-            elif confirm == 'a':
-                allowed_commands.add(base_command)
-                with open(CONFIG_FILE, "a", encoding="utf-8") as f:
-                    f.write(base_command + "\n")
-                print(f"\033[92m✓ '{base_command}' adicionado à whitelist permanente.\033[0m")
-            
-            print("\n\033[90m⚙ Executando...\033[0m")
-            try:
-                result = subprocess.run(
-                    clean_response, 
-                    shell=True, 
-                    text=True, 
-                    capture_output=True,
-                    executable='/bin/bash',
-                    timeout=60  # Timeout de 60 segundos
-                )
-                output = result.stdout + result.stderr
-                if not output.strip():
-                    output = "[✓ Comando executado com sucesso, sem saída no terminal]"
-            except subprocess.TimeoutExpired:
-                output = "[⚠ Timeout: Comando excedeu 60 segundos]"
-            except Exception as e:
-                output = f"[❌ Erro de execução]: {str(e)}"
-            
-            # Exibe output com limite de caracteres
-            display_output = output if len(output) < 2000 else output[:2000] + "\n\n... [Saída truncada - total: {} caracteres]".format(len(output))
-            print(f"\n\033[90m┌─ Resultado:\033[0m")
-            for line in display_output.split('\n'):
-                print(f"\033[90m│ {line}\033[0m")
-            print(f"\033[90m└─\033[0m\n")
-            
+        
+        # Verifica se tem comando
+        if "command" not in cmd_data:
+            print("\033[91m❌ Erro: JSON não contém campo 'command'.\033[0m")
             save_to_session("assistant", response_content)
-            save_to_session("user", f"Saída do último comando executado:\n{output}\n\nAnalise o resultado. Se precisar de mais comandos, envie-os. Se o objetivo inicial foi atingido, responda apenas com SUMMARY:.")
+            save_to_session("user", "ERRO: JSON deve conter o campo 'command'. Corrija e retorne o JSON correto.")
+            continue
+        
+        command = cmd_data["command"].strip()
+        
+        if not command:
+            print("\033[91m❌ Erro: Comando vazio.\033[0m")
+            save_to_session("assistant", response_content)
+            save_to_session("user", "ERRO: O campo 'command' está vazio. Forneça um comando válido.")
+            continue
+        
+        # Exibe o comando
+        display_command(cmd_data, iteration)
+        
+        # Pega o comando base para whitelist
+        base_command = command.split()[0] if command else ""
+        
+        # Verifica se é comando destrutivo
+        is_dangerous = is_destructive_command(command)
+        
+        # Decide sobre confirmação
+        if base_command in allowed_commands:
+            print(f"\033[92m✓ Auto-permitido: '{base_command}'\033[0m")
+            confirm = 'enter'
+        else:
+            if is_dangerous:
+                print(f"\033[91m⚠️  ATENÇÃO: Comando potencialmente DESTRUTIVO!\033[0m")
+            
+            print(f"\n\033[95m❓ Executar este comando?\033[0m")
+            print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir '{base_command}'")
+            confirm = input("\033[95m➜ \033[0m").strip().lower()
+        
+        if confirm == 'n':
+            print("\033[91m⚠ Comando abortado pelo usuário.\033[0m")
+            save_to_session("assistant", response_content)
+            save_to_session("user", "O usuário ABORTOU este comando. Forneça uma alternativa diferente ou, se não houver alternativa viável, finalize com status SUMMARY explicando que não foi possível completar a tarefa.")
+            continue
+        elif confirm == 'a':
+            allowed_commands.add(base_command)
+            with open(CONFIG_FILE, "a", encoding="utf-8") as f:
+                f.write(base_command + "\n")
+            print(f"\033[92m✓ '{base_command}' adicionado à whitelist permanente.\033[0m")
+        
+        print("\n\033[90m⚙ Executando...\033[0m")
+        
+        # Executa o comando
+        try:
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                text=True, 
+                capture_output=True,
+                executable='/bin/bash',
+                timeout=120  # Timeout de 2 minutos
+            )
+            output = result.stdout + result.stderr
+            success = result.returncode == 0
+            
+            if not output.strip():
+                output = "[Comando executado com sucesso, sem saída no terminal]"
+        except subprocess.TimeoutExpired:
+            output = "[⚠ Timeout: Comando excedeu 120 segundos]"
+            success = False
+        except Exception as e:
+            output = f"[❌ Erro de execução]: {str(e)}"
+            success = False
+        
+        # Exibe output
+        display_output(output, success)
+        
+        # Salva na sessão
+        save_to_session("assistant", response_content)
+        
+        # Prepara feedback para a IA
+        feedback = f"""Resultado da execução do comando:
+
+COMANDO: {command}
+STATUS: {'Sucesso (exit code 0)' if success else 'Falha (exit code não-zero)'}
+
+OUTPUT:
+{output}
+
+Analise este resultado. Se precisar executar mais comandos para completar o objetivo, retorne o próximo comando em JSON. Se o objetivo inicial foi atingido, retorne JSON com status "SUMMARY" e uma explicação detalhada de tudo que foi feito."""
+        
+        save_to_session("user", feedback)
     
     if iteration >= max_iterations:
         print(f"\n\033[91m⚠ Limite de {max_iterations} iterações atingido. Encerrando.\033[0m\n")
 
 def chat_loop(first_prompt=""):
+    model_source = "💾 carregado do cache" if os.path.exists(MODEL_CONFIG_FILE) else "🆕 padrão"
     print("\033[96m" + "="*60 + "\033[0m")
     print("\033[96m🤖 OpenRouter AGENT - Assistente Linux Autônomo\033[0m")
     print("\033[96m" + "="*60 + "\033[0m")
-    print(f"\033[90mModelo ativo:\033[0m {active_model}")
+    print(f"\033[90mModelo ativo:\033[0m {active_model} ({model_source})")
+    print(f"\033[90mModo:\033[0m ⚡ Um comando por vez (JSON estruturado)")
     if allowed_commands:
         print(f"\033[90mWhitelist:\033[0m {len(allowed_commands)} comandos auto-permitidos")
-    print(f"\033[90mComandos:\033[0m /help /clear /exit /status")
+    print(f"\033[90mComandos:\033[0m /help /clear /exit /status /resetmodel")
     print("\033[96m" + "="*60 + "\033[0m\n")
     
     if first_prompt:
