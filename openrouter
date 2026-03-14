@@ -12,10 +12,11 @@ import re
 import select
 import tty
 import termios
+import signal
 
 # Configurações iniciais
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
-SESSION_FILE = "~/.SESSION.md"
+SESSION_FILE = "SESSION.md"
 CONFIG_FILE = os.path.expanduser("~/.openrouter.cfg")
 MODEL_CONFIG_FILE = os.path.expanduser("~/.openrouter_model.cfg")
 DEFAULT_MODEL = "qwen/qwen3-coder:free"
@@ -24,6 +25,14 @@ DEFAULT_MODEL = "qwen/qwen3-coder:free"
 MAX_CONTEXT_TOKENS = 120000  # ~120k tokens de segurança
 CHARS_PER_TOKEN = 4  # Estimativa: 1 token ≈ 4 caracteres
 MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN  # ~480k chars
+
+# Configurações do usuário (podem ser alteradas via comandos)
+USER_CONFIG = {
+    'command_timeout': 120,  # Timeout padrão em segundos
+    'max_iterations': 30,    # Máximo de comandos por tarefa
+    'max_output_lines': 50,  # Linhas de output exibidas
+    'api_timeout': 30,       # Timeout de chamadas API
+}
 
 # Créditos
 AUTHOR_NAME = "Osvaldo J. Filho"
@@ -308,7 +317,7 @@ def call_openrouter(messages):
     req = urllib.request.Request(url, headers=headers, data=json.dumps(data).encode("utf-8"))
     
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=USER_CONFIG['api_timeout']) as response:
             result = json.loads(response.read().decode("utf-8"))
             save_working_model(active_model)
             return result["choices"][0]["message"]["content"], active_model
@@ -342,7 +351,7 @@ def call_openrouter(messages):
         req = urllib.request.Request(url, headers=headers, data=json.dumps(data).encode("utf-8"))
         
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=USER_CONFIG['api_timeout']) as response:
                 result = json.loads(response.read().decode("utf-8"))
                 active_model = current_model
                 save_working_model(active_model)
@@ -383,63 +392,85 @@ def format_elapsed_time(seconds):
         mins = int((seconds % 3600) // 60)
         return f"{hours}h {mins}m"
 
-def check_for_esc():
-    """Verifica se ESC foi pressionado (não-bloqueante)."""
-    if sys.platform == 'win32':
-        # Windows - não implementado
-        return False
+class KeyboardInterruptHandler:
+    """Handler para capturar Ctrl+C sem quebrar o programa."""
+    def __init__(self):
+        self.interrupted = False
     
-    # Linux/Mac
-    try:
-        old_settings = termios.tcgetattr(sys.stdin)
+    def __enter__(self):
+        self.interrupted = False
+        self.old_handler = signal.signal(signal.SIGINT, self.handler)
+        return self
+    
+    def handler(self, signum, frame):
+        self.interrupted = True
+    
+    def __exit__(self, type, value, traceback):
+        signal.signal(signal.SIGINT, self.old_handler)
+
+def check_for_interrupt():
+    """Verifica se Ctrl+C foi pressionado (mais confiável que ESC)."""
+    # Usa método alternativo: verificação de stdin com timeout zero
+    if sys.platform != 'win32':
         try:
-            tty.setcbreak(sys.stdin.fileno())
-            if select.select([sys.stdin], [], [], 0)[0]:
-                ch = sys.stdin.read(1)
-                # ESC = \x1b
-                if ch == '\x1b':
-                    return True
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-    except:
-        pass
-    
+            # Salva configurações atuais do terminal
+            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                # Coloca em modo cbreak (lê caracteres sem esperar Enter)
+                tty.setcbreak(sys.stdin.fileno())
+                # Verifica se há input disponível (não bloqueia)
+                dr, dw, de = select.select([sys.stdin], [], [], 0)
+                if dr:
+                    # Lê o caractere
+                    c = sys.stdin.read(1)
+                    # Ctrl+C = \x03, ESC = \x1b
+                    if c in ['\x03', '\x1b']:
+                        return True
+            finally:
+                # Restaura configurações do terminal
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
     return False
 
 def call_openrouter_with_spinner(messages):
-    """Executa a chamada de API em uma thread separada com timer e detecção de ESC."""
+    """Executa a chamada de API em uma thread separada com timer e detecção de interrupção."""
     result_container = {'data': None, 'aborted': False}
     start_time = time.time()
     
     def worker():
-        result_container['data'] = call_openrouter(messages)
+        try:
+            result_container['data'] = call_openrouter(messages)
+        except Exception as e:
+            result_container['data'] = (f"[Erro na thread]: {str(e)}", None)
         
-    t = threading.Thread(target=worker)
+    t = threading.Thread(target=worker, daemon=True)
     t.start()
     
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     idx = 0
     
-    print("\033[90m(Pressione ESC para cancelar)\033[0m")
+    print("\033[90m(Pressione Ctrl+C para cancelar)\033[0m")
     
-    while t.is_alive():
-        elapsed = time.time() - start_time
-        elapsed_str = format_elapsed_time(elapsed)
-        
-        sys.stdout.write(f"\r\033[96m🤖 IA Pensando... {spinner[idx]} ({elapsed_str})\033[0m")
-        sys.stdout.flush()
-        idx = (idx + 1) % len(spinner)
-        
-        # Verifica ESC
-        if check_for_esc():
-            sys.stdout.write("\r\033[2K")
-            print("\033[93m⚠ Cancelamento solicitado...\033[0m")
-            result_container['aborted'] = True
-            # Aguarda thread terminar (não podemos matar ela forçadamente)
-            t.join(timeout=2)
-            break
-        
-        time.sleep(0.1)
+    with KeyboardInterruptHandler() as h:
+        while t.is_alive():
+            elapsed = time.time() - start_time
+            elapsed_str = format_elapsed_time(elapsed)
+            
+            sys.stdout.write(f"\r\033[96m🤖 IA Pensando... {spinner[idx]} ({elapsed_str})\033[0m")
+            sys.stdout.flush()
+            idx = (idx + 1) % len(spinner)
+            
+            # Verifica interrupção via handler
+            if h.interrupted or check_for_interrupt():
+                sys.stdout.write("\r\033[2K")
+                print("\033[93m⚠ Cancelamento solicitado...\033[0m")
+                result_container['aborted'] = True
+                # Aguarda thread terminar com timeout
+                t.join(timeout=3)
+                break
+            
+            time.sleep(0.1)
     
     sys.stdout.write("\r\033[2K")
     
@@ -599,15 +630,16 @@ def display_output(output, success=True):
     if not output.strip():
         print(f"{color}│ [Comando executado sem saída no terminal]\033[0m")
     else:
-        # Limita output exibido a 50 linhas
+        # Limita output exibido conforme configuração
+        max_lines = USER_CONFIG['max_output_lines']
         lines = output.split('\n')
-        display_lines = lines[:50]
+        display_lines = lines[:max_lines]
         
         for line in display_lines:
             print(f"{color}│ {line}\033[0m")
         
-        if len(lines) > 50:
-            remaining = len(lines) - 50
+        if len(lines) > max_lines:
+            remaining = len(lines) - max_lines
             print(f"{color}│ ... [{remaining} linhas restantes omitidas]\033[0m")
     
     print(f"{color}└─\033[0m\n")
@@ -629,6 +661,9 @@ def process_command(user_input):
         print("/exit       - Sai do programa")
         print("/help       - Mostra esta ajuda")
         print("/status     - Mostra status da sessão")
+        print("/config     - Mostra configurações atuais")
+        print("/timeout N  - Define timeout de comandos (ex: /timeout 60)")
+        print("/maxiter N  - Define máximo de iterações (ex: /maxiter 50)")
         print("/resetmodel - Reseta o modelo salvo para o padrão")
         print("\n\033[96m=== WHITELIST ===\033[0m")
         if allowed_commands:
@@ -636,6 +671,40 @@ def process_command(user_input):
         else:
             print("Nenhum comando na whitelist ainda")
         print(f"Arquivo: {CONFIG_FILE}\n")
+        return "_skip_"
+    elif user_input == "/config":
+        print(f"\n\033[96m=== CONFIGURAÇÕES ===\033[0m")
+        print(f"Timeout de comandos: {USER_CONFIG['command_timeout']}s")
+        print(f"Timeout de API: {USER_CONFIG['api_timeout']}s")
+        print(f"Máximo de iterações: {USER_CONFIG['max_iterations']}")
+        print(f"Linhas de output exibidas: {USER_CONFIG['max_output_lines']}")
+        print(f"\n\033[90mUse /timeout, /maxiter para alterar\033[0m\n")
+        return "_skip_"
+    elif user_input.startswith("/timeout "):
+        try:
+            value = int(user_input.split()[1])
+            if value < 10:
+                print("\033[91m✗ Timeout mínimo é 10 segundos\033[0m")
+            elif value > 3600:
+                print("\033[91m✗ Timeout máximo é 3600 segundos (1 hora)\033[0m")
+            else:
+                USER_CONFIG['command_timeout'] = value
+                print(f"\033[92m✓ Timeout de comandos alterado para {value}s\033[0m")
+        except (ValueError, IndexError):
+            print("\033[91m✗ Uso: /timeout N (onde N é o tempo em segundos)\033[0m")
+        return "_skip_"
+    elif user_input.startswith("/maxiter "):
+        try:
+            value = int(user_input.split()[1])
+            if value < 5:
+                print("\033[91m✗ Mínimo é 5 iterações\033[0m")
+            elif value > 100:
+                print("\033[91m✗ Máximo é 100 iterações\033[0m")
+            else:
+                USER_CONFIG['max_iterations'] = value
+                print(f"\033[92m✓ Máximo de iterações alterado para {value}\033[0m")
+        except (ValueError, IndexError):
+            print("\033[91m✗ Uso: /maxiter N (onde N é o número de iterações)\033[0m")
         return "_skip_"
     elif user_input == "/status":
         messages = load_session()
@@ -678,14 +747,27 @@ def process_command(user_input):
 
 def handle_turn(user_text):
     save_to_session("user", user_text)
-    max_iterations = 30
+    max_iterations = USER_CONFIG['max_iterations']
     iteration = 0
+    
+    # Rastreamento de métricas
+    task_start_time = time.time()
+    total_api_calls = 0
+    estimated_tokens_used = 0
     
     while iteration < max_iterations:
         iteration += 1
         messages = load_session()
         
         response_content, successful_model, aborted = call_openrouter_with_spinner(messages)
+        
+        # Incrementa contador de API calls
+        if not aborted and successful_model:
+            total_api_calls += 1
+            # Estima tokens usados (request + response)
+            request_tokens = get_total_tokens(messages)
+            response_tokens = estimate_tokens(response_content)
+            estimated_tokens_used += request_tokens + response_tokens
         
         # Verifica se foi abortado via ESC
         if aborted:
@@ -740,10 +822,36 @@ CORRIJA E RETORNE:
         # Verifica se é SUMMARY (tarefa concluída)
         if cmd_data.get("status") == "SUMMARY":
             message = cmd_data.get("message", "Tarefa concluída.")
+            
+            # Calcula tempo total
+            task_duration = time.time() - task_start_time
+            duration_str = format_elapsed_time(task_duration)
+            
+            # Recupera ÚLTIMO objetivo (não o primeiro!)
+            messages_list = load_session()
+            original_objective = None
+            for msg in reversed(messages_list):  # ← Busca de trás pra frente
+                if msg["role"] == "user" and msg["content"].startswith("OBJETIVO:"):
+                    original_objective = msg["content"].replace("OBJETIVO:", "").strip()
+                    break
+            
             print(f"\n\033[92m{'='*60}\033[0m")
             print(f"\033[92m✅ TAREFA CONCLUÍDA (via {successful_model})\033[0m")
             print(f"\033[92m{'='*60}\033[0m")
-            print(f"\n{message}\n")
+            
+            # Mostra objetivo original
+            if original_objective:
+                print(f"\n\033[96m📌 Solicitação original:\033[0m")
+                print(f"\033[96m{original_objective}\033[0m")
+            
+            # Mostra métricas
+            print(f"\n\033[90m⏱️  Tempo total: {duration_str}\033[0m")
+            print(f"\033[90m🔄 Comandos executados: {iteration}\033[0m")
+            print(f"\033[90m🌐 Chamadas de API: {total_api_calls}\033[0m")
+            print(f"\033[90m🎯 Tokens estimados: ~{estimated_tokens_used:,}\033[0m")
+            
+            print(f"\n\033[92m📋 Resultado:\033[0m")
+            print(f"{message}\n")
             print(f"\033[92m{'='*60}\033[0m\n")
             save_to_session("assistant", response_content)
             break
@@ -842,7 +950,7 @@ Retorne um novo JSON com comando não-interativo."""
         
         print("\n\033[90m⚙ Executando...\033[0m")
         
-        # Executa o comando
+        # Executa o comando com timeout configurável
         try:
             result = subprocess.run(
                 command, 
@@ -850,7 +958,7 @@ Retorne um novo JSON com comando não-interativo."""
                 text=True, 
                 capture_output=True,
                 executable='/bin/bash',
-                timeout=120
+                timeout=USER_CONFIG['command_timeout']
             )
             output = result.stdout + result.stderr
             success = result.returncode == 0
@@ -858,7 +966,7 @@ Retorne um novo JSON com comando não-interativo."""
             if not output.strip():
                 output = "[Comando executado com sucesso, sem saída no terminal]"
         except subprocess.TimeoutExpired:
-            output = "[⚠ Timeout: Comando excedeu 120 segundos]"
+            output = f"[⚠ Timeout: Comando excedeu {USER_CONFIG['command_timeout']} segundos]"
             success = False
         except Exception as e:
             output = f"[❌ Erro de execução]: {str(e)}"
@@ -888,7 +996,99 @@ LEMBRE-SE: Retorne APENAS UM objeto JSON. Não retorne múltiplos JSONs."""
     if iteration >= max_iterations:
         print(f"\n\033[91m⚠ Limite de {max_iterations} iterações atingido. Encerrando.\033[0m\n")
 
+def detect_paste(text):
+    """Detecta se o texto foi colado (múltiplas linhas ou muito longo)."""
+    lines = text.split('\n')
+    is_paste = len(lines) > 1 or len(text) > 200
+    return is_paste, len(lines)
+
+def enable_paste_mode():
+    """Habilita modo de paste no readline para permitir colar múltiplas linhas."""
+    try:
+        # Habilita bracketed paste mode no readline
+        # Isso permite que o terminal detecte quando texto é colado
+        readline.parse_and_bind('set enable-bracketed-paste on')
+    except:
+        pass
+
+def read_multiline_paste():
+    """Lê múltiplas linhas se paste for detectado."""
+    lines = []
+    first_line = input("\033[92m💬 Você >\033[0m ")
+    
+    # Se primeira linha está vazia ou é muito curta, retorna direto
+    if not first_line or len(first_line) < 10:
+        return first_line.strip()
+    
+    lines.append(first_line)
+    
+    # Tenta ler mais linhas se houver (modo paste)
+    try:
+        # Configura timeout muito curto para detectar paste
+        import sys
+        if sys.platform != 'win32':
+            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                
+                # Lê caracteres adicionais rapidamente (paste mode)
+                additional_text = ""
+                while True:
+                    dr, dw, de = select.select([sys.stdin], [], [], 0.05)  # 50ms timeout
+                    if not dr:
+                        break
+                    chunk = sys.stdin.read(1)
+                    if not chunk:
+                        break
+                    additional_text += chunk
+                    
+                if additional_text:
+                    lines.append(additional_text)
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    except:
+        pass
+    
+    return '\n'.join(lines).strip()
+
+def read_input_with_paste_detection():
+    """Lê input do usuário com detecção de paste."""
+    try:
+        user_input = read_multiline_paste()
+        
+        if not user_input:
+            return ""
+        
+        # Detecta se foi paste
+        is_paste, line_count = detect_paste(user_input)
+        
+        if is_paste:
+            # Mostra feedback de paste
+            char_count = len(user_input)
+            print(f"\n\033[96m📋 Conteúdo colado: {line_count} linhas, {char_count:,} caracteres\033[0m")
+            
+            # Mostra preview (primeiras 5 linhas)
+            lines = user_input.split('\n')
+            preview_lines = lines[:5]
+            
+            print(f"\033[90m┌─ Preview:\033[0m")
+            for i, line in enumerate(preview_lines, 1):
+                display_line = line[:100] + "..." if len(line) > 100 else line
+                print(f"\033[90m│ L{i}: {display_line}\033[0m")
+            
+            if len(lines) > 5:
+                print(f"\033[90m│ ... (+{len(lines) - 5} linhas adicionais)\033[0m")
+            print(f"\033[90m└─\033[0m\n")
+        
+        return user_input
+    
+    except EOFError:
+        return None
+
 def chat_loop(first_prompt=""):
+    # Habilita modo de paste
+    enable_paste_mode()
+    
     model_source = "💾 carregado do cache" if os.path.exists(MODEL_CONFIG_FILE) else "🆕 padrão"
     
     # Banner com créditos
@@ -967,7 +1167,12 @@ def chat_loop(first_prompt=""):
         
     while True:
         try:
-            user_input = input("\033[92m💬 Você >\033[0m ").strip()
+            user_input = read_input_with_paste_detection()
+            
+            if user_input is None:  # EOFError
+                print("\n\n👋 Saindo...")
+                break
+            
             if not user_input:
                 continue
             
@@ -979,7 +1184,7 @@ def chat_loop(first_prompt=""):
                 
             handle_turn(f"OBJETIVO: {processed_input}")
             
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
             print("\n\n👋 Saindo...")
             break
 
