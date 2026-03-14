@@ -28,10 +28,10 @@ MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN  # ~480k chars
 
 # Configurações do usuário (podem ser alteradas via comandos)
 USER_CONFIG = {
-    'command_timeout': 120,  # Timeout padrão em segundos
+    'command_timeout': 360,  # Timeout de EXECUÇÃO de comandos shell (padrão 6 min)
+    'api_timeout': 30,       # Timeout de CHAMADAS de API (padrão 30s)
     'max_iterations': 30,    # Máximo de comandos por tarefa
     'max_output_lines': 50,  # Linhas de output exibidas
-    'api_timeout': 30,       # Timeout de chamadas API
 }
 
 # Créditos
@@ -178,6 +178,8 @@ def load_session():
 
 def estimate_tokens(text):
     """Estima número de tokens baseado em caracteres."""
+    if text is None:
+        return 0
     return len(text) // CHARS_PER_TOKEN
 
 def get_total_tokens(messages):
@@ -657,14 +659,15 @@ def process_command(user_input):
         sys.exit(0)
     elif user_input == "/help":
         print("\n\033[96m=== COMANDOS DISPONÍVEIS ===\033[0m")
-        print("/clear      - Limpa o histórico da sessão")
-        print("/exit       - Sai do programa")
-        print("/help       - Mostra esta ajuda")
-        print("/status     - Mostra status da sessão")
-        print("/config     - Mostra configurações atuais")
-        print("/timeout N  - Define timeout de comandos (ex: /timeout 60)")
-        print("/maxiter N  - Define máximo de iterações (ex: /maxiter 50)")
-        print("/resetmodel - Reseta o modelo salvo para o padrão")
+        print("/clear         - Limpa o histórico da sessão")
+        print("/exit          - Sai do programa")
+        print("/help          - Mostra esta ajuda")
+        print("/status        - Mostra status da sessão")
+        print("/config        - Mostra configurações atuais")
+        print("/timeout_cmd N - Define timeout de EXECUÇÃO de comandos shell (ex: /timeout_cmd 300)")
+        print("/timeout_api N - Define timeout de CHAMADAS de API (ex: /timeout_api 60)")
+        print("/maxiter N     - Define máximo de iterações (ex: /maxiter 50)")
+        print("/resetmodel    - Reseta o modelo salvo para o padrão")
         print("\n\033[96m=== WHITELIST ===\033[0m")
         if allowed_commands:
             print(f"Comandos auto-permitidos: {', '.join(sorted(allowed_commands))}")
@@ -674,24 +677,37 @@ def process_command(user_input):
         return "_skip_"
     elif user_input == "/config":
         print(f"\n\033[96m=== CONFIGURAÇÕES ===\033[0m")
-        print(f"Timeout de comandos: {USER_CONFIG['command_timeout']}s")
-        print(f"Timeout de API: {USER_CONFIG['api_timeout']}s")
+        print(f"Timeout de execução de comandos: {USER_CONFIG['command_timeout']}s")
+        print(f"Timeout de chamadas API: {USER_CONFIG['api_timeout']}s")
         print(f"Máximo de iterações: {USER_CONFIG['max_iterations']}")
         print(f"Linhas de output exibidas: {USER_CONFIG['max_output_lines']}")
-        print(f"\n\033[90mUse /timeout, /maxiter para alterar\033[0m\n")
+        print(f"\n\033[90mUse /timeout_cmd, /timeout_api, /maxiter para alterar\033[0m\n")
         return "_skip_"
-    elif user_input.startswith("/timeout "):
+    elif user_input.startswith("/timeout_cmd "):
         try:
             value = int(user_input.split()[1])
             if value < 10:
                 print("\033[91m✗ Timeout mínimo é 10 segundos\033[0m")
-            elif value > 3600:
-                print("\033[91m✗ Timeout máximo é 3600 segundos (1 hora)\033[0m")
+            elif value > 7200:
+                print("\033[91m✗ Timeout máximo é 7200 segundos (2 horas)\033[0m")
             else:
                 USER_CONFIG['command_timeout'] = value
-                print(f"\033[92m✓ Timeout de comandos alterado para {value}s\033[0m")
+                print(f"\033[92m✓ Timeout de execução de comandos alterado para {value}s\033[0m")
         except (ValueError, IndexError):
-            print("\033[91m✗ Uso: /timeout N (onde N é o tempo em segundos)\033[0m")
+            print("\033[91m✗ Uso: /timeout_cmd N (onde N é o tempo em segundos)\033[0m")
+        return "_skip_"
+    elif user_input.startswith("/timeout_api "):
+        try:
+            value = int(user_input.split()[1])
+            if value < 5:
+                print("\033[91m✗ Timeout mínimo é 5 segundos\033[0m")
+            elif value > 300:
+                print("\033[91m✗ Timeout máximo é 300 segundos (5 minutos)\033[0m")
+            else:
+                USER_CONFIG['api_timeout'] = value
+                print(f"\033[92m✓ Timeout de chamadas API alterado para {value}s\033[0m")
+        except (ValueError, IndexError):
+            print("\033[91m✗ Uso: /timeout_api N (onde N é o tempo em segundos)\033[0m")
         return "_skip_"
     elif user_input.startswith("/maxiter "):
         try:
@@ -746,14 +762,20 @@ def process_command(user_input):
     return user_input
 
 def handle_turn(user_text):
+    # Separador visual para nova tarefa
+    print(f"\n\033[96m{'━'*60}\033[0m")
+    print(f"\033[96m🎯 NOVA TAREFA INICIADA\033[0m")
+    print(f"\033[96m{'━'*60}\033[0m\n")
+    
     save_to_session("user", user_text)
     max_iterations = USER_CONFIG['max_iterations']
     iteration = 0
     
-    # Rastreamento de métricas
+    # Rastreamento de métricas (resetado a cada nova tarefa via handle_turn)
     task_start_time = time.time()
     total_api_calls = 0
     estimated_tokens_used = 0
+    commands_executed = 0  # Contador separado de comandos realmente executados
     
     while iteration < max_iterations:
         iteration += 1
@@ -766,10 +788,10 @@ def handle_turn(user_text):
             total_api_calls += 1
             # Estima tokens usados (request + response)
             request_tokens = get_total_tokens(messages)
-            response_tokens = estimate_tokens(response_content)
+            response_tokens = estimate_tokens(response_content) if response_content else 0
             estimated_tokens_used += request_tokens + response_tokens
         
-        # Verifica se foi abortado via ESC
+        # Verifica se foi abortado via Ctrl+C
         if aborted:
             print("\n\033[93m⚠ Operação cancelada pelo usuário.\033[0m")
             print("\n\033[95m❓ O que deseja fazer?\033[0m")
@@ -793,6 +815,12 @@ def handle_turn(user_text):
             print("\033[91m❌ Falha crítica na comunicação com a IA.\033[0m")
             print("\033[93mDica: Verifique sua conexão e se a API_KEY está correta.\033[0m")
             break
+        
+        # Verifica se response_content não é None
+        if response_content is None:
+            print("\033[91m❌ Erro: API retornou resposta vazia.\033[0m")
+            print("\033[93mTentando novamente...\033[0m")
+            continue
 
         # Parseia JSON
         cmd_data = parse_json_response(response_content)
@@ -846,7 +874,7 @@ CORRIJA E RETORNE:
             
             # Mostra métricas
             print(f"\n\033[90m⏱️  Tempo total: {duration_str}\033[0m")
-            print(f"\033[90m🔄 Comandos executados: {iteration}\033[0m")
+            print(f"\033[90m🔄 Comandos executados: {commands_executed}\033[0m")
             print(f"\033[90m🌐 Chamadas de API: {total_api_calls}\033[0m")
             print(f"\033[90m🎯 Tokens estimados: ~{estimated_tokens_used:,}\033[0m")
             
@@ -949,6 +977,9 @@ Retorne um novo JSON com comando não-interativo."""
                 print(f"\033[92m✓ {len(not_whitelisted)} comandos adicionados à whitelist: {', '.join(not_whitelisted)}\033[0m")
         
         print("\n\033[90m⚙ Executando...\033[0m")
+        
+        # Incrementa contador de comandos executados
+        commands_executed += 1
         
         # Executa o comando com timeout configurável
         try:

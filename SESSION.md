@@ -1,12 +1,12 @@
 
 ### User:
-OBJETIVO: envie o dir atual para o git
+OBJETIVO: faca o commit do git do dir atual
 
 ### Assistant:
 {
-  "explanation": "Verificar se o diretório atual já é um repositório Git",
-  "reason": "Precisamos saber se já existe um repositório inicializado antes de enviar mudanças",
-  "command": "git status"
+  "command": "git status",
+  "explanation": "Verificar o status atual do repositório Git",
+  "reason": "Antes de fazer commit, precisamos saber quais arquivos foram modificados e se estamos em um repositório Git válido"
 }
 
 ### User:
@@ -22,14 +22,12 @@ Your branch is up to date with 'origin/main'.
 Changes not staged for commit:
   (use "git add <file>..." to update what will be committed)
   (use "git restore <file>..." to discard changes in working directory)
+	modified:   SESSION.md
 	modified:   openrouter
 
 Untracked files:
   (use "git add <file>..." to include in what will be committed)
-	SESSION.md
-	mcp_server.py
-	server.log
-	teste.txt
+	Dash-3.2.0.tar.gz
 
 no changes added to commit (use "git add" and/or "git commit -a")
 
