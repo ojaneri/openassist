@@ -9,13 +9,27 @@ import subprocess
 import threading
 import time
 import re
+import select
+import tty
+import termios
 
 # Configurações iniciais
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
-SESSION_FILE = "SESSION.md"
+SESSION_FILE = "~/.SESSION.md"
 CONFIG_FILE = os.path.expanduser("~/.openrouter.cfg")
 MODEL_CONFIG_FILE = os.path.expanduser("~/.openrouter_model.cfg")
 DEFAULT_MODEL = "qwen/qwen3-coder:free"
+
+# Limites de contexto (em tokens aproximados)
+MAX_CONTEXT_TOKENS = 120000  # ~120k tokens de segurança
+CHARS_PER_TOKEN = 4  # Estimativa: 1 token ≈ 4 caracteres
+MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN  # ~480k chars
+
+# Créditos
+AUTHOR_NAME = "Osvaldo J. Filho"
+AUTHOR_LINKEDIN = "linkedin.com/in/ojaneri"
+AUTHOR_INSTAGRAM = "instagram.com/peritosegurancadainformacao"
+AUTHOR_WEBSITE = "https://perito.digital"
 
 FALLBACK_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
@@ -31,6 +45,14 @@ DESTRUCTIVE_COMMANDS = {
     'rm', 'rmdir', 'dd', 'mkfs', 'fdisk', 'parted', 
     'shred', 'wipefs', 'chmod', 'chown', 'kill', 'killall',
     'shutdown', 'reboot', 'halt', 'poweroff'
+}
+
+# Comandos interativos que devem ser evitados
+INTERACTIVE_COMMANDS = {
+    'nano', 'vim', 'vi', 'emacs', 'pico', 'joe',
+    'less', 'more', 'top', 'htop', 'man',
+    'mysql', 'psql', 'mongo', 'redis-cli',
+    'python', 'python3', 'node', 'irb', 'php'  # sem args interativos
 }
 
 if not API_KEY:
@@ -81,8 +103,9 @@ Sua tarefa é resolver a solicitação do usuário passo a passo usando comandos
 
 FORMATO DE RESPOSTA OBRIGATÓRIO:
 
-Retorne APENAS UM comando por vez em formato JSON válido:
+Retorne APENAS UM ÚNICO objeto JSON por resposta. NÃO retorne múltiplos JSONs.
 
+Para comandos, use este formato:
 {
   "command": "comando bash aqui",
   "explanation": "breve explicação do que o comando faz",
@@ -90,14 +113,13 @@ Retorne APENAS UM comando por vez em formato JSON válido:
 }
 
 Quando a tarefa estiver 100% concluída, retorne:
-
 {
   "status": "SUMMARY",
   "message": "Explicação detalhada do que foi feito e resultados finais"
 }
 
 REGRAS ESTRITAS:
-1. APENAS um comando por resposta
+1. APENAS UM objeto JSON por resposta - NUNCA retorne dois ou mais JSONs
 2. SEMPRE em formato JSON válido
 3. NÃO use markdown (sem ```json ou ```)
 4. NÃO adicione texto antes ou depois do JSON
@@ -106,11 +128,26 @@ REGRAS ESTRITAS:
 7. Analise o output devolvido antes de enviar o próximo comando
 8. Se um comando falhar, analise o erro e tente uma alternativa
 9. Seja eficiente: use comandos que retornem resultados diretos
+10. NUNCA use comandos interativos como nano, vim, vi, less, more, top, etc
+11. Use comandos não-interativos: echo, cat, tee, sed, awk, grep, etc
 
 IMPORTANTE:
-- Um comando = uma resposta JSON
+- Um comando = uma resposta JSON = um objeto
 - Aguarde o output antes de decidir o próximo passo
 - Quando completar o objetivo, envie o JSON com status "SUMMARY"
+- Para criar/editar arquivos, use: echo, cat, tee, sed - NUNCA nano/vim/vi
+- Para ler arquivos: cat, head, tail, grep - NUNCA less/more/nano
+
+EXEMPLOS CORRETOS:
+✓ {"command": "cat file.txt", "explanation": "Ler conteúdo do arquivo"}
+✓ {"command": "echo 'conteúdo' > file.txt", "explanation": "Criar arquivo"}
+✓ {"command": "grep 'padrão' file.txt", "explanation": "Buscar no arquivo"}
+
+EXEMPLOS INCORRETOS:
+✗ Retornar dois JSONs na mesma resposta
+✗ {"command": "nano file.txt", ...} - comando interativo
+✗ {"command": "vim file.txt", ...} - comando interativo
+✗ {"command": "less file.txt", ...} - comando interativo
 """
 
 def load_session():
@@ -125,7 +162,132 @@ def load_session():
             messages.append({"role": "user", "content": block.replace("User:\n", "", 1).strip()})
         elif block.startswith("Assistant:\n"):
             messages.append({"role": "assistant", "content": block.replace("Assistant:\n", "", 1).strip()})
+    
+    # Gerencia limite de contexto
+    messages = manage_context_window(messages)
     return messages
+
+def estimate_tokens(text):
+    """Estima número de tokens baseado em caracteres."""
+    return len(text) // CHARS_PER_TOKEN
+
+def get_total_tokens(messages):
+    """Calcula total de tokens em todas as mensagens."""
+    total = 0
+    for msg in messages:
+        total += estimate_tokens(msg["content"])
+    return total
+
+def compress_message(content):
+    """Compacta uma mensagem removendo redundâncias."""
+    # Remove múltiplas linhas vazias
+    content = re.sub(r'\n\n+', '\n\n', content)
+    
+    # Se for output muito longo, resume
+    if "OUTPUT:" in content and len(content) > 5000:
+        parts = content.split("OUTPUT:")
+        if len(parts) == 2:
+            header = parts[0]
+            output = parts[1]
+            
+            # Pega primeiras e últimas linhas do output
+            lines = output.strip().split('\n')
+            if len(lines) > 20:
+                compressed_output = '\n'.join(lines[:10]) + f'\n... [{len(lines) - 20} linhas omitidas] ...\n' + '\n'.join(lines[-10:])
+                content = header + "OUTPUT:\n" + compressed_output
+    
+    return content
+
+def manage_context_window(messages):
+    """Gerencia limite de contexto: compacta ou trunca mensagens antigas."""
+    total_tokens = get_total_tokens(messages)
+    
+    # Se está dentro do limite, retorna como está
+    if total_tokens <= MAX_CONTEXT_TOKENS:
+        return messages
+    
+    print(f"\033[93m⚠ Contexto grande ({total_tokens} tokens). Compactando...\033[0m")
+    
+    # Estratégia 1: Compactar mensagens antigas
+    system_msg = messages[0]
+    user_assistant_msgs = messages[1:]
+    
+    compressed_msgs = [system_msg]
+    for msg in user_assistant_msgs:
+        compressed_content = compress_message(msg["content"])
+        compressed_msgs.append({"role": msg["role"], "content": compressed_content})
+    
+    total_tokens = get_total_tokens(compressed_msgs)
+    
+    # Se ainda está grande, trunca mantendo as mais recentes
+    if total_tokens > MAX_CONTEXT_TOKENS:
+        print(f"\033[93m⚠ Ainda grande ({total_tokens} tokens). Truncando para mensagens recentes...\033[0m")
+        
+        # Mantém system prompt + últimas N mensagens
+        system_msg = compressed_msgs[0]
+        recent_msgs = []
+        current_tokens = estimate_tokens(system_msg["content"])
+        
+        # Adiciona mensagens de trás para frente até atingir limite
+        for msg in reversed(compressed_msgs[1:]):
+            msg_tokens = estimate_tokens(msg["content"])
+            if current_tokens + msg_tokens > MAX_CONTEXT_TOKENS:
+                break
+            recent_msgs.insert(0, msg)
+            current_tokens += msg_tokens
+        
+        truncated_msgs = [system_msg] + recent_msgs
+        
+        print(f"\033[92m✓ Contexto truncado: {len(truncated_msgs)} mensagens ({current_tokens} tokens)\033[0m")
+        return truncated_msgs
+    
+    print(f"\033[92m✓ Contexto compactado: {total_tokens} tokens\033[0m")
+    return compressed_msgs
+
+def get_session_summary():
+    """Gera resumo da sessão atual."""
+    if not os.path.exists(SESSION_FILE):
+        return None
+    
+    messages = []
+    with open(SESSION_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+    blocks = content.split("\n### ")
+    
+    commands_executed = []
+    last_objective = None
+    last_summary = None
+    
+    for block in blocks:
+        if block.startswith("User:\n"):
+            user_content = block.replace("User:\n", "", 1).strip()
+            if user_content.startswith("OBJETIVO:"):
+                last_objective = user_content.replace("OBJETIVO:", "").strip()
+        elif block.startswith("Assistant:\n"):
+            assistant_content = block.replace("Assistant:\n", "", 1).strip()
+            
+            # Tenta parsear JSON
+            try:
+                data = json.loads(assistant_content)
+                if "command" in data:
+                    commands_executed.append(data["command"])
+                elif "status" in data and data["status"] == "SUMMARY":
+                    last_summary = data.get("message", "")
+            except:
+                pass
+    
+    if not last_objective and not commands_executed:
+        return None
+    
+    summary = {
+        "objective": last_objective,
+        "commands_count": len(commands_executed),
+        "last_commands": commands_executed[-3:] if len(commands_executed) > 0 else [],
+        "completed": last_summary is not None,
+        "summary": last_summary
+    }
+    
+    return summary
 
 def save_to_session(role, content):
     with open(SESSION_FILE, "a", encoding="utf-8") as f:
@@ -208,9 +370,46 @@ def call_openrouter(messages):
             
     return f"[Erro] Todos os modelos falharam. Último erro: {last_error}", None
 
+def format_elapsed_time(seconds):
+    """Formata tempo decorrido em formato legível."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+
+def check_for_esc():
+    """Verifica se ESC foi pressionado (não-bloqueante)."""
+    if sys.platform == 'win32':
+        # Windows - não implementado
+        return False
+    
+    # Linux/Mac
+    try:
+        old_settings = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            if select.select([sys.stdin], [], [], 0)[0]:
+                ch = sys.stdin.read(1)
+                # ESC = \x1b
+                if ch == '\x1b':
+                    return True
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    except:
+        pass
+    
+    return False
+
 def call_openrouter_with_spinner(messages):
-    """Executa a chamada de API em uma thread separada para animar o spinner."""
-    result_container = {}
+    """Executa a chamada de API em uma thread separada com timer e detecção de ESC."""
+    result_container = {'data': None, 'aborted': False}
+    start_time = time.time()
     
     def worker():
         result_container['data'] = call_openrouter(messages)
@@ -220,15 +419,37 @@ def call_openrouter_with_spinner(messages):
     
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     idx = 0
+    
+    print("\033[90m(Pressione ESC para cancelar)\033[0m")
+    
     while t.is_alive():
-        sys.stdout.write(f"\r\033[96m🤖 IA Pensando... {spinner[idx]}\033[0m")
+        elapsed = time.time() - start_time
+        elapsed_str = format_elapsed_time(elapsed)
+        
+        sys.stdout.write(f"\r\033[96m🤖 IA Pensando... {spinner[idx]} ({elapsed_str})\033[0m")
         sys.stdout.flush()
         idx = (idx + 1) % len(spinner)
-        time.sleep(0.1)
         
-    t.join()
+        # Verifica ESC
+        if check_for_esc():
+            sys.stdout.write("\r\033[2K")
+            print("\033[93m⚠ Cancelamento solicitado...\033[0m")
+            result_container['aborted'] = True
+            # Aguarda thread terminar (não podemos matar ela forçadamente)
+            t.join(timeout=2)
+            break
+        
+        time.sleep(0.1)
+    
     sys.stdout.write("\r\033[2K")
-    return result_container.get('data', ("[Erro Interno da Thread]", None))
+    
+    if result_container['aborted']:
+        return None, None, True  # data, model, aborted
+    
+    if result_container['data']:
+        return result_container['data'][0], result_container['data'][1], False
+    
+    return "[Erro Interno da Thread]", None, False
 
 def parse_json_response(response_text):
     """Extrai e parseia JSON da resposta, removendo markdown se necessário."""
@@ -240,17 +461,54 @@ def parse_json_response(response_text):
     elif clean_text.startswith("```"):
         clean_text = clean_text.split("```", 1)[1].split("```", 1)[0].strip()
     
+    # Detecta múltiplos JSONs (erro comum)
+    json_count = clean_text.count('{"')
+    if json_count > 1:
+        print(f"\033[91m⚠ Detectados {json_count} objetos JSON na resposta!\033[0m")
+        print(f"\033[93m   A IA deve retornar APENAS UM JSON por vez.\033[0m")
+        return None
+    
     try:
         return json.loads(clean_text)
     except json.JSONDecodeError as e:
         # Tenta encontrar JSON no texto
-        json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        json_match = re.search(r'\{[^}]*"command"[^}]*\}|\{[^}]*"status"[^}]*\}', clean_text, re.DOTALL)
         if json_match:
             try:
                 return json.loads(json_match.group())
             except:
                 pass
         return None
+
+def extract_all_base_commands(command):
+    """Extrai todos os comandos base de um comando encadeado (com &&, ||, ;, |)."""
+    # Separa por operadores de encadeamento
+    separators = [' && ', ' || ', ' ; ', ' | ']
+    
+    # Substitui temporariamente para split único
+    temp_command = command
+    for sep in separators:
+        temp_command = temp_command.replace(sep, '|||')
+    
+    # Split e extrai comando base de cada parte
+    parts = temp_command.split('|||')
+    base_commands = []
+    
+    for part in parts:
+        part = part.strip()
+        if part:
+            # Pega primeiro comando (antes de espaço ou operador)
+            base_cmd = part.split()[0] if part.split() else ""
+            if base_cmd and base_cmd not in base_commands:
+                base_commands.append(base_cmd)
+    
+    return base_commands
+
+def check_all_commands_whitelisted(command, allowed_commands):
+    """Verifica se TODOS os comandos do encadeamento estão na whitelist."""
+    base_commands = extract_all_base_commands(command)
+    not_whitelisted = [cmd for cmd in base_commands if cmd not in allowed_commands]
+    return base_commands, not_whitelisted
 
 def is_destructive_command(command):
     """Verifica se o comando é potencialmente destrutivo."""
@@ -275,6 +533,42 @@ def is_destructive_command(command):
             return True
     
     return False
+
+def is_interactive_command(command):
+    """Verifica se o comando é interativo e não deve ser usado."""
+    base_cmd = command.split()[0] if command.strip() else ""
+    
+    # Verifica comando base
+    if base_cmd in INTERACTIVE_COMMANDS:
+        return True
+    
+    # Verifica padrões interativos
+    interactive_patterns = [
+        r'^(python|python3|node|irb|php)\s*$',  # Sem argumentos = REPL interativo
+        r'^(mysql|psql|mongo|redis-cli)\s+(-u|-h)?',  # CLIs de banco
+    ]
+    
+    for pattern in interactive_patterns:
+        if re.match(pattern, command.strip()):
+            return True
+    
+    return False
+
+def suggest_alternative_command(command):
+    """Sugere alternativa não-interativa para comandos interativos."""
+    base_cmd = command.split()[0] if command.strip() else ""
+    
+    alternatives = {
+        'nano': 'echo "conteúdo" > arquivo.txt  OU  cat > arquivo.txt << EOF',
+        'vim': 'echo "conteúdo" > arquivo.txt  OU  sed -i "s/antigo/novo/" arquivo.txt',
+        'vi': 'echo "conteúdo" > arquivo.txt  OU  tee arquivo.txt',
+        'less': 'cat arquivo.txt  OU  head/tail arquivo.txt',
+        'more': 'cat arquivo.txt  OU  head -n 50 arquivo.txt',
+        'top': 'ps aux --sort=-%cpu | head -n 20',
+        'htop': 'ps aux --sort=-%cpu | head -n 20',
+    }
+    
+    return alternatives.get(base_cmd, "Use comandos não-interativos (cat, echo, sed, awk, grep, etc)")
 
 def display_command(cmd_data, step_num=None, total_steps=None):
     """Exibe o comando formatado com explicação."""
@@ -344,11 +638,31 @@ def process_command(user_input):
         print(f"Arquivo: {CONFIG_FILE}\n")
         return "_skip_"
     elif user_input == "/status":
-        msg_count = len(load_session()) - 1
+        messages = load_session()
+        msg_count = len(messages) - 1
+        total_tokens = get_total_tokens(messages)
         model_source = "✓ salvo" if os.path.exists(MODEL_CONFIG_FILE) else "padrão"
+        
         print(f"\n\033[96m=== STATUS ===\033[0m")
         print(f"Modelo ativo: {active_model} ({model_source})")
         print(f"Mensagens na sessão: {msg_count}")
+        print(f"Tokens estimados: {total_tokens:,} / {MAX_CONTEXT_TOKENS:,}")
+        
+        # Barra de progresso do contexto
+        usage_percent = (total_tokens / MAX_CONTEXT_TOKENS) * 100
+        bar_length = 40
+        filled = int((usage_percent / 100) * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        
+        if usage_percent < 50:
+            color = "\033[92m"  # Verde
+        elif usage_percent < 80:
+            color = "\033[93m"  # Amarelo
+        else:
+            color = "\033[91m"  # Vermelho
+        
+        print(f"Uso do contexto: {color}[{bar}] {usage_percent:.1f}%\033[0m")
+        
         print(f"Comandos na whitelist: {len(allowed_commands)}")
         print(f"Arquivo de sessão: {SESSION_FILE}")
         print(f"Arquivo de modelo: {MODEL_CONFIG_FILE}\n")
@@ -364,14 +678,34 @@ def process_command(user_input):
 
 def handle_turn(user_text):
     save_to_session("user", user_text)
-    max_iterations = 30  # Aumentado para permitir mais passos
+    max_iterations = 30
     iteration = 0
     
     while iteration < max_iterations:
         iteration += 1
         messages = load_session()
         
-        response_content, successful_model = call_openrouter_with_spinner(messages)
+        response_content, successful_model, aborted = call_openrouter_with_spinner(messages)
+        
+        # Verifica se foi abortado via ESC
+        if aborted:
+            print("\n\033[93m⚠ Operação cancelada pelo usuário.\033[0m")
+            print("\n\033[95m❓ O que deseja fazer?\033[0m")
+            print("   [b] Abortar completamente")
+            print("   [t] Tentar novamente")
+            
+            choice = input("\033[95m➜ \033[0m").strip().lower()
+            
+            if choice == 'b':
+                print("\033[91m✗ Tarefa abortada.\033[0m")
+                break
+            elif choice == 't':
+                print("\033[96m🔄 Tentando novamente...\033[0m")
+                iteration -= 1  # Não conta esta iteração
+                continue
+            else:
+                print("\033[91m✗ Opção inválida. Abortando.\033[0m")
+                break
         
         if not successful_model:
             print("\033[91m❌ Falha crítica na comunicação com a IA.\033[0m")
@@ -385,7 +719,22 @@ def handle_turn(user_text):
             print("\033[91m❌ Erro: IA não retornou JSON válido.\033[0m")
             print(f"\033[90mResposta recebida:\033[0m\n{response_content[:500]}\n")
             save_to_session("assistant", response_content)
-            save_to_session("user", "ERRO: Sua resposta não está em formato JSON válido. Corrija e retorne apenas o JSON conforme especificado no system prompt.")
+            
+            # Feedback específico para IA
+            error_feedback = """ERRO DE FORMATAÇÃO: Sua resposta não está em formato JSON válido.
+
+PROBLEMAS DETECTADOS:
+- Você pode ter retornado MÚLTIPLOS objetos JSON (só retorne UM)
+- O JSON pode estar malformado
+- Pode haver texto antes/depois do JSON
+
+CORRIJA E RETORNE:
+- APENAS UM objeto JSON
+- Sem texto adicional
+- Formato: {"command": "...", "explanation": "...", "reason": "..."}
+  OU: {"status": "SUMMARY", "message": "..."}
+"""
+            save_to_session("user", error_feedback)
             continue
 
         # Verifica se é SUMMARY (tarefa concluída)
@@ -414,25 +763,64 @@ def handle_turn(user_text):
             save_to_session("user", "ERRO: O campo 'command' está vazio. Forneça um comando válido.")
             continue
         
+        # Verifica se é comando interativo
+        if is_interactive_command(command):
+            alternative = suggest_alternative_command(command)
+            print(f"\033[91m❌ Erro: Comando INTERATIVO detectado!\033[0m")
+            print(f"\033[93m   Comando: {command}\033[0m")
+            print(f"\033[96m   Alternativa: {alternative}\033[0m\n")
+            save_to_session("assistant", response_content)
+            
+            feedback = f"""ERRO: Você tentou usar um comando INTERATIVO que não funciona em modo automático.
+
+COMANDO REJEITADO: {command}
+MOTIVO: Comandos interativos (nano, vim, less, etc) requerem interação humana
+
+ALTERNATIVA SUGERIDA: {alternative}
+
+Por favor, refaça usando comandos NÃO-INTERATIVOS:
+- Para criar/editar arquivos: echo, cat, tee, sed
+- Para ler arquivos: cat, head, tail, grep
+- Para processar texto: awk, sed, grep, cut
+
+Retorne um novo JSON com comando não-interativo."""
+            save_to_session("user", feedback)
+            continue
+        
         # Exibe o comando
         display_command(cmd_data, iteration)
         
-        # Pega o comando base para whitelist
-        base_command = command.split()[0] if command else ""
+        # Extrai TODOS os comandos base (considerando &&, ||, ;, |)
+        all_base_commands, not_whitelisted = check_all_commands_whitelisted(command, allowed_commands)
         
         # Verifica se é comando destrutivo
         is_dangerous = is_destructive_command(command)
         
         # Decide sobre confirmação
-        if base_command in allowed_commands:
-            print(f"\033[92m✓ Auto-permitido: '{base_command}'\033[0m")
+        if len(not_whitelisted) == 0:
+            # Todos os comandos estão na whitelist
+            print(f"\033[92m✓ Todos os comandos auto-permitidos: {', '.join(all_base_commands)}\033[0m")
             confirm = 'enter'
         else:
+            # Mostra quais comandos precisam de aprovação
+            if len(all_base_commands) > 1:
+                print(f"\n\033[96mℹ Comando encadeado detectado!\033[0m")
+                print(f"\033[96m  Comandos encontrados: {', '.join(all_base_commands)}\033[0m")
+                if allowed_commands & set(all_base_commands):
+                    whitelisted = [cmd for cmd in all_base_commands if cmd in allowed_commands]
+                    print(f"\033[92m  ✓ Já permitidos: {', '.join(whitelisted)}\033[0m")
+                print(f"\033[93m  ⚠ Precisam aprovação: {', '.join(not_whitelisted)}\033[0m")
+            
             if is_dangerous:
-                print(f"\033[91m⚠️  ATENÇÃO: Comando potencialmente DESTRUTIVO!\033[0m")
+                print(f"\n\033[91m⚠️  ATENÇÃO: Comando potencialmente DESTRUTIVO!\033[0m")
             
             print(f"\n\033[95m❓ Executar este comando?\033[0m")
-            print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir '{base_command}'")
+            
+            if len(not_whitelisted) == 1:
+                print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir '{not_whitelisted[0]}'")
+            else:
+                print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir TODOS ({', '.join(not_whitelisted)})")
+            
             confirm = input("\033[95m➜ \033[0m").strip().lower()
         
         if confirm == 'n':
@@ -441,10 +829,16 @@ def handle_turn(user_text):
             save_to_session("user", "O usuário ABORTOU este comando. Forneça uma alternativa diferente ou, se não houver alternativa viável, finalize com status SUMMARY explicando que não foi possível completar a tarefa.")
             continue
         elif confirm == 'a':
-            allowed_commands.add(base_command)
-            with open(CONFIG_FILE, "a", encoding="utf-8") as f:
-                f.write(base_command + "\n")
-            print(f"\033[92m✓ '{base_command}' adicionado à whitelist permanente.\033[0m")
+            # Adiciona TODOS os comandos não-whitelistados
+            for cmd in not_whitelisted:
+                allowed_commands.add(cmd)
+                with open(CONFIG_FILE, "a", encoding="utf-8") as f:
+                    f.write(cmd + "\n")
+            
+            if len(not_whitelisted) == 1:
+                print(f"\033[92m✓ '{not_whitelisted[0]}' adicionado à whitelist permanente.\033[0m")
+            else:
+                print(f"\033[92m✓ {len(not_whitelisted)} comandos adicionados à whitelist: {', '.join(not_whitelisted)}\033[0m")
         
         print("\n\033[90m⚙ Executando...\033[0m")
         
@@ -456,7 +850,7 @@ def handle_turn(user_text):
                 text=True, 
                 capture_output=True,
                 executable='/bin/bash',
-                timeout=120  # Timeout de 2 minutos
+                timeout=120
             )
             output = result.stdout + result.stderr
             success = result.returncode == 0
@@ -485,7 +879,9 @@ STATUS: {'Sucesso (exit code 0)' if success else 'Falha (exit code não-zero)'}
 OUTPUT:
 {output}
 
-Analise este resultado. Se precisar executar mais comandos para completar o objetivo, retorne o próximo comando em JSON. Se o objetivo inicial foi atingido, retorne JSON com status "SUMMARY" e uma explicação detalhada de tudo que foi feito."""
+Analise este resultado. Se precisar executar mais comandos para completar o objetivo, retorne o próximo comando em JSON (APENAS UM JSON). Se o objetivo inicial foi atingido, retorne JSON com status "SUMMARY" e uma explicação detalhada de tudo que foi feito.
+
+LEMBRE-SE: Retorne APENAS UM objeto JSON. Não retorne múltiplos JSONs."""
         
         save_to_session("user", feedback)
     
@@ -494,6 +890,8 @@ Analise este resultado. Se precisar executar mais comandos para completar o obje
 
 def chat_loop(first_prompt=""):
     model_source = "💾 carregado do cache" if os.path.exists(MODEL_CONFIG_FILE) else "🆕 padrão"
+    
+    # Banner com créditos
     print("\033[96m" + "="*60 + "\033[0m")
     print("\033[96m🤖 OpenRouter AGENT - Assistente Linux Autônomo\033[0m")
     print("\033[96m" + "="*60 + "\033[0m")
@@ -502,7 +900,65 @@ def chat_loop(first_prompt=""):
     if allowed_commands:
         print(f"\033[90mWhitelist:\033[0m {len(allowed_commands)} comandos auto-permitidos")
     print(f"\033[90mComandos:\033[0m /help /clear /exit /status /resetmodel")
+    print("\033[96m" + "="*60 + "\033[0m")
+    print(f"\033[90m👨‍💻 Desenvolvido por:\033[0m {AUTHOR_NAME}")
+    print(f"\033[90m🔗 LinkedIn:\033[0m {AUTHOR_LINKEDIN}")
+    print(f"\033[90m📸 Instagram:\033[0m {AUTHOR_INSTAGRAM}")
+    print(f"\033[90m🌐 Website:\033[0m {AUTHOR_WEBSITE}")
     print("\033[96m" + "="*60 + "\033[0m\n")
+    
+    # Verifica se existe sessão anterior
+    session_summary = get_session_summary()
+    
+    if session_summary and not first_prompt:
+        print("\033[93m📋 Sessão anterior encontrada!\033[0m\n")
+        
+        if session_summary["objective"]:
+            print(f"\033[96mÚltimo objetivo:\033[0m {session_summary['objective']}")
+        
+        print(f"\033[96mComandos executados:\033[0m {session_summary['commands_count']}")
+        
+        if session_summary["last_commands"]:
+            print(f"\033[96mÚltimos comandos:\033[0m")
+            for cmd in session_summary["last_commands"]:
+                print(f"  • {cmd}")
+        
+        if session_summary["completed"]:
+            print(f"\n\033[92m✅ Status:\033[0m Tarefa concluída")
+            if session_summary["summary"]:
+                summary_preview = session_summary["summary"][:150]
+                if len(session_summary["summary"]) > 150:
+                    summary_preview += "..."
+                print(f"\033[90m{summary_preview}\033[0m")
+        else:
+            print(f"\n\033[93m⏸ Status:\033[0m Tarefa incompleta")
+        
+        print(f"\n\033[95m❓ O que deseja fazer?\033[0m")
+        print("   [c] Continuar de onde parou")
+        print("   [n] Nova instrução (limpa sessão)")
+        
+        choice = input("\033[95m➜ \033[0m").strip().lower()
+        
+        if choice == 'n':
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
+            print("\033[92m✓ Sessão anterior limpa. Começando do zero.\033[0m\n")
+        elif choice == 'c':
+            print("\033[96m🔄 Continuando sessão anterior...\033[0m\n")
+            
+            # Se a tarefa estava completa, pede novo objetivo
+            if session_summary["completed"]:
+                print("\033[93mA tarefa anterior foi concluída.\033[0m")
+                user_input = input("\033[92m💬 Novo objetivo >\033[0m ").strip()
+                if user_input:
+                    handle_turn(f"OBJETIVO: {user_input}")
+            else:
+                # Continua automaticamente
+                handle_turn("Continue de onde parou. Analise o último resultado e prossiga com o próximo comando necessário para completar o objetivo original.")
+        else:
+            print("\033[91m✗ Opção inválida. Começando nova sessão.\033[0m\n")
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
     
     if first_prompt:
         processed = process_command(first_prompt)
