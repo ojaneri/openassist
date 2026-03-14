@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import urllib.request
+import urllib.error
+import readline
+import subprocess
+import threading
+import time
+
+# Configurações iniciais
+API_KEY = os.environ.get("OPENROUTER_API_KEY")
+SESSION_FILE = "SESSION.md"
+CONFIG_FILE = os.path.expanduser("~/.openrouter.cfg")
+DEFAULT_MODEL = "qwen/qwen3-coder:free"
+
+FALLBACK_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openai/gpt-oss-120b:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "openrouter/free"
+]
+
+if not API_KEY:
+    print("Erro: OPENROUTER_API_KEY não definida.")
+    print("Configure com: export OPENROUTER_API_KEY='sua-chave-aqui'")
+    sys.exit(1)
+
+# Carrega a Whitelist de comandos permitidos
+allowed_commands = set()
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        allowed_commands = set(line.strip() for line in f if line.strip())
+
+args = sys.argv[1:]
+# Memória de modelo ativo para a sessão (Sticky Model)
+active_model = DEFAULT_MODEL
+initial_prompt = ""
+
+if args:
+    if "/" in args[0]:
+        active_model = args[0]
+        initial_prompt = " ".join(args[1:])
+    else:
+        initial_prompt = " ".join(args)
+
+SYSTEM_PROMPT = """Você é um agente autônomo de administração Linux executando em um loop de automação.
+Sua tarefa é resolver a solicitação do usuário passo a passo usando comandos de terminal.
+
+REGRAS ESTRITAS DE COMPORTAMENTO:
+1. Se você precisa investigar, alterar arquivos ou executar qualquer ação, retorne APENAS os comandos Bash, um por linha.
+2. NÃO use formatação markdown (sem ```bash). NÃO adicione explicações de texto antes ou depois dos comandos. APENAS os comandos crus.
+3. O sistema executará o seu comando no terminal host e devolverá o resultado (stdout/stderr) para você na próxima mensagem.
+4. Analise a saída devolvida. Se precisar de mais comandos, envie o próximo.
+5. Quando a tarefa solicitada pelo usuário estiver 100% concluída ou se você esgotar as possibilidades, você DEVE iniciar sua resposta com a palavra exata "SUMMARY:" seguida de uma explicação humana detalhando tudo o que foi feito e os resultados finais.
+
+IMPORTANTE: 
+- Para comandos complexos ou pipelines, sempre use uma única linha.
+- Seja eficiente: use comandos que retornem resultados diretos.
+- Se um comando falhar, analise o erro e tente uma alternativa."""
+
+def load_session():
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if not os.path.exists(SESSION_FILE):
+        return messages
+    with open(SESSION_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+    blocks = content.split("\n### ")
+    for block in blocks:
+        if block.startswith("User:\n"):
+            messages.append({"role": "user", "content": block.replace("User:\n", "", 1).strip()})
+        elif block.startswith("Assistant:\n"):
+            messages.append({"role": "assistant", "content": block.replace("Assistant:\n", "", 1).strip()})
+    return messages
+
+def save_to_session(role, content):
+    with open(SESSION_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n### {role.capitalize()}:\n{content}\n")
+
+def call_openrouter(messages):
+    global active_model
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://linux-cli-agent.local",
+        "X-Title": "Linux Sysadmin Agent"
+    }
+    
+    # Coloca o modelo ativo atual no topo, seguido pelos outros fallbacks
+    models_to_try = [active_model]
+    for m in FALLBACK_MODELS:
+        if m not in models_to_try:
+            models_to_try.append(m)
+            
+    last_error = None
+    for current_model in models_to_try:
+        data = {"model": current_model, "messages": messages}
+        req = urllib.request.Request(url, headers=headers, data=json.dumps(data).encode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                active_model = current_model  # Salva o modelo que deu certo
+                return result["choices"][0]["message"]["content"], current_model
+        except urllib.error.HTTPError as e:
+            sys.stdout.write("\r\033[2K")
+            try:
+                error_body = e.read().decode("utf-8")
+                error_data = json.loads(error_body)
+                error_msg = error_data.get('error', {}).get('message', 'Erro desconhecido')
+                print(f"\033[93m[Aviso] {current_model} falhou ({e.code}): {error_msg}\033[0m")
+                last_error = f"{current_model}: {error_msg}"
+            except:
+                print(f"\033[93m[Aviso] {current_model} falhou ({e.code}). Tentando próximo...\033[0m")
+                last_error = f"{current_model}: HTTP {e.code}"
+            continue
+        except urllib.error.URLError as e:
+            sys.stdout.write("\r\033[2K")
+            print(f"\033[93m[Aviso] {current_model}: Erro de conexão - {str(e.reason)}\033[0m")
+            last_error = f"{current_model}: {str(e.reason)}"
+            continue
+        except Exception as e:
+            sys.stdout.write("\r\033[2K")
+            print(f"\033[91m[Erro] {current_model}: {str(e)}\033[0m")
+            last_error = f"{current_model}: {str(e)}"
+            continue
+            
+    return f"[Erro] Todos os modelos falharam. Último erro: {last_error}", None
+
+def call_openrouter_with_spinner(messages):
+    """Executa a chamada de API em uma thread separada para animar o spinner."""
+    result_container = {}
+    
+    def worker():
+        result_container['data'] = call_openrouter(messages)
+        
+    t = threading.Thread(target=worker)
+    t.start()
+    
+    spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    idx = 0
+    while t.is_alive():
+        sys.stdout.write(f"\r\033[96m🤖 IA Pensando... {spinner[idx]}\033[0m")
+        sys.stdout.flush()
+        idx = (idx + 1) % len(spinner)
+        time.sleep(0.1)
+        
+    t.join()
+    sys.stdout.write("\r\033[2K")  # Limpa a linha do spinner quando termina
+    return result_container.get('data', ("[Erro Interno da Thread]", None))
+
+def process_command(user_input):
+    if user_input == "/clear":
+        if os.path.exists(SESSION_FILE):
+            os.remove(SESSION_FILE)
+        print("\033[92m✓ Sessão limpa. Histórico zerado.\033[0m")
+        return "_clear_"
+    elif user_input in ["/exit", "/quit"]:
+        print("\n👋 Até logo!")
+        sys.exit(0)
+    elif user_input == "/help":
+        print("\n\033[96m=== COMANDOS DISPONÍVEIS ===\033[0m")
+        print("/clear  - Limpa o histórico da sessão")
+        print("/exit   - Sai do programa")
+        print("/help   - Mostra esta ajuda")
+        print("/status - Mostra status da sessão")
+        print("\n\033[96m=== WHITELIST ===\033[0m")
+        if allowed_commands:
+            print(f"Comandos auto-permitidos: {', '.join(sorted(allowed_commands))}")
+        else:
+            print("Nenhum comando na whitelist ainda")
+        print(f"Arquivo: {CONFIG_FILE}\n")
+        return "_skip_"
+    elif user_input == "/status":
+        msg_count = len(load_session()) - 1  # -1 para não contar o system prompt
+        print(f"\n\033[96m=== STATUS ===\033[0m")
+        print(f"Modelo ativo: {active_model}")
+        print(f"Mensagens na sessão: {msg_count}")
+        print(f"Comandos na whitelist: {len(allowed_commands)}")
+        print(f"Arquivo de sessão: {SESSION_FILE}\n")
+        return "_skip_"
+    return user_input
+
+def handle_turn(user_text):
+    save_to_session("user", user_text)
+    max_iterations = 20  # Limite de segurança para evitar loops infinitos
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        messages = load_session()
+        
+        response_content, successful_model = call_openrouter_with_spinner(messages)
+        
+        if not successful_model:
+            print("\033[91m❌ Falha crítica na comunicação com a IA.\033[0m")
+            print("\033[93mDica: Verifique sua conexão e se a API_KEY está correta.\033[0m")
+            break
+
+        clean_response = response_content.strip()
+        
+        # Filtro Markdown aprimorado
+        if clean_response.startswith("```bash"):
+            clean_response = clean_response.split("```bash", 1)[1].split("```", 1)[0].strip()
+        elif clean_response.startswith("```sh"):
+            clean_response = clean_response.split("```sh", 1)[1].split("```", 1)[0].strip()
+        elif clean_response.startswith("```"):
+            clean_response = clean_response.split("```", 1)[1].split("```", 1)[0].strip()
+
+        if clean_response.startswith("SUMMARY:"):
+            final_text = clean_response.replace("SUMMARY:", "", 1).strip()
+            print(f"\n\033[92m{'='*60}\033[0m")
+            print(f"\033[92m✅ TAREFA CONCLUÍDA (via {successful_model})\033[0m")
+            print(f"\033[92m{'='*60}\033[0m")
+            print(f"\n{final_text}\n")
+            print(f"\033[92m{'='*60}\033[0m\n")
+            save_to_session("assistant", response_content)
+            break
+            
+        else:
+            # Pega o primeiro termo do comando para a whitelist
+            base_command = clean_response.split()[0] if clean_response.strip() else ""
+            
+            print(f"\n\033[96m┌─ Comando sugerido por {successful_model}\033[0m")
+            print(f"\033[96m│\033[0m")
+            print(f"\033[93m│ {clean_response}\033[0m")
+            print(f"\033[96m└─\033[0m")
+            
+            # Verifica se o comando já está na whitelist
+            if base_command in allowed_commands:
+                print(f"\033[92m✓ Auto-permitido: '{base_command}'\033[0m")
+                confirm = 'enter'
+            else:
+                print(f"\n\033[95m❓ Executar este comando?\033[0m")
+                print(f"   [Enter] Sim  |  [n] Não  |  [a] Sempre permitir '{base_command}'")
+                confirm = input("\033[95m➜ \033[0m").strip().lower()
+            
+            if confirm == 'n':
+                print("\033[91m⚠ Comando abortado pelo usuário.\033[0m")
+                save_to_session("assistant", response_content)
+                save_to_session("user", "O usuário abortou este comando. Forneça uma alternativa ou finalize com SUMMARY:.")
+                continue
+            elif confirm == 'a':
+                allowed_commands.add(base_command)
+                with open(CONFIG_FILE, "a", encoding="utf-8") as f:
+                    f.write(base_command + "\n")
+                print(f"\033[92m✓ '{base_command}' adicionado à whitelist permanente.\033[0m")
+            
+            print("\n\033[90m⚙ Executando...\033[0m")
+            try:
+                result = subprocess.run(
+                    clean_response, 
+                    shell=True, 
+                    text=True, 
+                    capture_output=True,
+                    executable='/bin/bash',
+                    timeout=60  # Timeout de 60 segundos
+                )
+                output = result.stdout + result.stderr
+                if not output.strip():
+                    output = "[✓ Comando executado com sucesso, sem saída no terminal]"
+            except subprocess.TimeoutExpired:
+                output = "[⚠ Timeout: Comando excedeu 60 segundos]"
+            except Exception as e:
+                output = f"[❌ Erro de execução]: {str(e)}"
+            
+            # Exibe output com limite de caracteres
+            display_output = output if len(output) < 2000 else output[:2000] + "\n\n... [Saída truncada - total: {} caracteres]".format(len(output))
+            print(f"\n\033[90m┌─ Resultado:\033[0m")
+            for line in display_output.split('\n'):
+                print(f"\033[90m│ {line}\033[0m")
+            print(f"\033[90m└─\033[0m\n")
+            
+            save_to_session("assistant", response_content)
+            save_to_session("user", f"Saída do último comando executado:\n{output}\n\nAnalise o resultado. Se precisar de mais comandos, envie-os. Se o objetivo inicial foi atingido, responda apenas com SUMMARY:.")
+    
+    if iteration >= max_iterations:
+        print(f"\n\033[91m⚠ Limite de {max_iterations} iterações atingido. Encerrando.\033[0m\n")
+
+def chat_loop(first_prompt=""):
+    print("\033[96m" + "="*60 + "\033[0m")
+    print("\033[96m🤖 OpenRouter AGENT - Assistente Linux Autônomo\033[0m")
+    print("\033[96m" + "="*60 + "\033[0m")
+    print(f"\033[90mModelo ativo:\033[0m {active_model}")
+    if allowed_commands:
+        print(f"\033[90mWhitelist:\033[0m {len(allowed_commands)} comandos auto-permitidos")
+    print(f"\033[90mComandos:\033[0m /help /clear /exit /status")
+    print("\033[96m" + "="*60 + "\033[0m\n")
+    
+    if first_prompt:
+        processed = process_command(first_prompt)
+        if processed and processed not in ["_clear_", "_skip_"]:
+            handle_turn(f"OBJETIVO: {processed}")
+        
+    while True:
+        try:
+            user_input = input("\033[92m💬 Você >\033[0m ").strip()
+            if not user_input:
+                continue
+            
+            processed_input = process_command(user_input)
+            if processed_input in ["_clear_", "_skip_"]:
+                continue
+            elif processed_input is None:
+                continue
+                
+            handle_turn(f"OBJETIVO: {processed_input}")
+            
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n👋 Saindo...")
+            break
+
+if __name__ == "__main__":
+    chat_loop(initial_prompt)
