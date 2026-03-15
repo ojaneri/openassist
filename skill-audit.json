@@ -1,0 +1,196 @@
+{
+  "name": "audit",
+  "version": "1.0",
+  "description": "Auditoria automatizada de segurança e compliance de servidores Linux, incluindo análise de logs, acessos, permissões e verificação de conformidade com PCI-DSS, HIPAA, LGPD e ISO 27001.",
+  "frameworks": [
+    "PCI-DSS v4.0",
+    "HIPAA Security Rule",
+    "LGPD (Lei 13.709/2018)",
+    "ISO 27001:2022",
+    "SOC 2 Type II",
+    "CIS Controls v8"
+  ],
+  "type": "security_audit",
+  "approval_required": false,
+  "max_iterations": 30,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Coleta de Logs",
+      "description": "Extração e consolidação de logs do sistema, autenticação e aplicações",
+      "tools": ["journalctl", "ausearch", "grep", "awk"],
+      "outputs": ["system_logs_<hostname>_<date>.json", "auth_events_<date>.json"]
+    },
+    {
+      "id": 2,
+      "name": "Análise de Acessos",
+      "description": "Auditoria de logins, comandos sudo, tentativas falhas e sessões ativas",
+      "tools": ["last", "lastb", "w", "who", "ausearch"],
+      "outputs": ["access_analysis_<hostname>_<date>.json", "failed_logins_<date>.log"]
+    },
+    {
+      "id": 3,
+      "name": "Auditoria de Permissões",
+      "description": "Identificação de SUID/SGID, arquivos world-writable e permissões inadequadas",
+      "tools": ["find", "stat", "ls"],
+      "outputs": ["suid_files_<date>.json", "dangerous_permissions_<date>.json"]
+    },
+    {
+      "id": 4,
+      "name": "Verificação de Compliance",
+      "description": "Checklist automatizado para PCI-DSS, HIPAA, LGPD e ISO 27001",
+      "tools": ["oscap", "lynis", "custom_scripts"],
+      "outputs": ["compliance_score_<standard>_<date>.json", "findings_<date>.json"]
+    },
+    {
+      "id": 5,
+      "name": "Detecção de Anomalias",
+      "description": "Identificação de comportamentos suspeitos, logins anômalos e atividades fora do padrão",
+      "tools": ["fail2ban", "custom_analysis"],
+      "outputs": ["anomalies_<hostname>_<date>.json", "suspicious_ips_<date>.txt"]
+    },
+    {
+      "id": 6,
+      "name": "Geração de Relatório",
+      "description": "Relatório executivo HTML/PDF com findings, scores e recomendações",
+      "deliverables": ["audit_report_<hostname>_<date>.html", "executive_summary.pdf"],
+      "outputs": ["audit_report_<hostname>_<date>.html", "findings_detailed_<date>.json"]
+    }
+  ],
+  "guardrails": {
+    "rate_limiting": {
+      "max_log_lines_per_file": 100000,
+      "max_find_depth": 5,
+      "timeout_per_phase": 600
+    },
+    "security": {
+      "require_root": false,
+      "sensitive_data_handling": "redact_passwords",
+      "forbidden_actions": ["modify_logs", "delete_audit_trails", "disable_auditd"]
+    },
+    "output_formats": {
+      "required": ["json", "html"],
+      "forbidden": ["plaintext_passwords", "unencrypted_sensitive_data"]
+    },
+    "compliance_standards": {
+      "pci_dss": {
+        "version": "4.0",
+        "key_requirements": ["2.2", "8.2", "8.3", "10.2", "10.3"]
+      },
+      "lgpd": {
+        "articles": ["46", "47", "48"],
+        "focus": "data_protection_measures"
+      }
+    }
+  },
+  "compliance_checks": {
+    "pci_dss": {
+      "req_2_2_4": "Disable unnecessary services",
+      "req_8_2_1": "Strong authentication mechanisms",
+      "req_8_3_2": "Multi-factor authentication for admin access",
+      "req_10_2": "Automated audit trails for all access",
+      "req_10_3_4": "Log retention minimum 90 days"
+    },
+    "hipaa": {
+      "164_308_a_1": "Security management process",
+      "164_308_a_5": "Security awareness training",
+      "164_312_a_1": "Access controls",
+      "164_312_b": "Audit controls"
+    },
+    "lgpd": {
+      "art_46": "Security and data protection measures",
+      "art_47": "Data protection agents",
+      "art_48": "Security incident notification"
+    },
+    "iso_27001": {
+      "A_9_2": "User access management",
+      "A_9_4": "System and application access control",
+      "A_12_4": "Logging and monitoring"
+    }
+  },
+  "key_commands": {
+    "log_collection": {
+      "system_logs": "journalctl --since '24 hours ago' --no-pager -o json > system_logs.json",
+      "auth_logs": "grep -E 'sshd|sudo|su\\[' /var/log/auth.log | tail -1000",
+      "failed_ssh": "grep 'Failed password' /var/log/auth.log | awk '{print $1, $2, $3, $11}' | sort | uniq -c",
+      "audit_logs": "ausearch -ts recent -i --format json > audit_events.json"
+    },
+    "access_analysis": {
+      "recent_logins": "last -n 100 -F -w",
+      "failed_attempts": "lastb -n 50 -F -w",
+      "current_users": "w -h | awk '{print $1, $3, $5}'",
+      "sudo_usage": "grep sudo /var/log/auth.log | tail -100",
+      "ssh_sessions": "who | grep pts"
+    },
+    "permission_audit": {
+      "suid_files": "find / -type f -perm -4000 -ls 2>/dev/null | awk '{print $3, $5, $6, $11}'",
+      "sgid_files": "find / -type f -perm -2000 -ls 2>/dev/null | awk '{print $3, $5, $6, $11}'",
+      "world_writable": "find / -type f -perm -002 ! -path '/proc/*' ! -path '/sys/*' 2>/dev/null",
+      "no_owner": "find / -nouser -o -nogroup 2>/dev/null",
+      "ssh_keys": "find /home -name 'authorized_keys' -o -name 'id_rsa' 2>/dev/null"
+    },
+    "compliance_scan": {
+      "lynis_audit": "lynis audit system --quick --quiet --no-colors",
+      "oscap_pci": "oscap xccdf eval --profile pci-dss /usr/share/xml/scap/ssg/content/ssg-*.xml",
+      "cis_benchmark": "grep -E 'PASS|FAIL|WARN' /var/log/lynis.log | tail -50",
+      "password_policy": "grep -E '^PASS_MAX_DAYS|^PASS_MIN_DAYS|^PASS_MIN_LEN' /etc/login.defs"
+    },
+    "anomaly_detection": {
+      "unusual_hours": "last | awk '$5 ~ /(00|01|02|03|04|05):/ {print $0}'",
+      "foreign_ips": "last | awk '{print $3}' | grep -v localhost | grep -E '^[0-9]+\\.' | sort -u",
+      "multiple_failed": "lastb | awk '{print $3}' | sort | uniq -c | sort -rn | head -20",
+      "privileged_commands": "grep -E 'useradd|usermod|userdel|passwd' /var/log/auth.log | tail -50"
+    },
+    "system_hardening_check": {
+      "firewall_status": "ufw status verbose || iptables -L -n -v",
+      "selinux_status": "getenforce 2>/dev/null || echo 'Not installed'",
+      "apparmor_status": "aa-status 2>/dev/null || echo 'Not installed'",
+      "ssh_config": "grep -E '^PermitRootLogin|^PasswordAuthentication|^Port' /etc/ssh/sshd_config"
+    }
+  },
+  "anomaly_patterns": {
+    "suspicious_logins": {
+      "multiple_failed_same_ip": "threshold: 5 attempts in 10 minutes",
+      "login_outside_hours": "22:00 - 06:00",
+      "login_from_new_country": "GeoIP check",
+      "root_login_ssh": "PermitRootLogin should be no"
+    },
+    "suspicious_commands": {
+      "mass_deletion": "rm -rf with wildcards",
+      "privilege_escalation": "sudo su, sudo -i without MFA",
+      "network_scanning": "nmap, masscan execution",
+      "exfiltration": "large scp/rsync transfers"
+    }
+  },
+  "severity_levels": {
+    "critical": {
+      "score_range": "9.0-10.0",
+      "examples": ["Root login via SSH", "World-writable SUID binary", "No password on admin account"],
+      "action": "Immediate remediation required"
+    },
+    "high": {
+      "score_range": "7.0-8.9",
+      "examples": ["Weak password policy", "Unnecessary services running", "Missing security patches"],
+      "action": "Remediation within 48 hours"
+    },
+    "medium": {
+      "score_range": "4.0-6.9",
+      "examples": ["Log retention too short", "Missing file integrity monitoring", "Incomplete backups"],
+      "action": "Remediation within 7 days"
+    },
+    "low": {
+      "score_range": "0.1-3.9",
+      "examples": ["Outdated documentation", "Missing security banners", "Non-critical services"],
+      "action": "Remediation within 30 days"
+    }
+  },
+  "instructions": "# SKILL AUDIT — Auditoria de Segurança e Compliance Linux\n\n## OBJETIVO\nRealizar auditoria automatizada de segurança em servidores Linux, cobrindo coleta de logs, análise de acessos, auditoria de permissões, verificação de compliance (PCI-DSS, HIPAA, LGPD, ISO 27001) e detecção de anomalias, com relatório HTML executivo ao final.\n\n## REGRAS GERAIS\n- NUNCA modifique logs, trilhas de auditoria ou configurações do auditd durante a execução.\n- Todos os outputs devem ser salvos em /tmp/audit/ como JSON ou HTML.\n- Dados sensíveis (senhas, hashes) devem ser REDACTED nos relatórios.\n- Respeite o timeout de 600 segundos por fase.\n- Máximo de 100.000 linhas por arquivo de log processado.\n- Depth máximo de 5 níveis em buscas com `find`.\n\n## VARIÁVEIS DE ENTRADA\nAntes de iniciar, obtenha do usuário:\n- `<hostname>` — hostname do servidor (ou use: hostname)\n- `<standards>` — padrões de compliance a verificar (padrão: todos)\n- `<output_dir>` — diretório de saída (padrão: /tmp/audit/)\n- `<date>` — data atual no formato YYYY-MM-DD\n\nCrie o diretório: mkdir -p /tmp/audit/\n\n## FASE 1 — COLETA DE LOGS\nObjetivo: Extrair e consolidar logs do sistema, autenticação e aplicações das últimas 24 horas.\n\n1. Logs do sistema via journald:\n   journalctl --since '24 hours ago' --no-pager -o json > /tmp/audit/system_logs_<hostname>_<date>.json\n\n2. Logs de autenticação:\n   grep -E 'sshd|sudo|su\\[' /var/log/auth.log | tail -10000 > /tmp/audit/auth_raw_<date>.log\n\n3. Logins SSH com falha:\n   grep 'Failed password' /var/log/auth.log | awk '{print $1, $2, $3, $11}' | sort | uniq -c | sort -rn > /tmp/audit/failed_ssh_<date>.log\n\n4. Eventos do auditd (se disponível):\n   ausearch -ts recent -i --format json > /tmp/audit/audit_events_<date>.json 2>/dev/null || echo 'auditd not available'\n\nConsolide em /tmp/audit/auth_events_<date>.json com estrutura:\n{\n  \"hostname\": \"<hostname>\",\n  \"period\": \"last 24 hours\",\n  \"total_auth_events\": 0,\n  \"failed_logins\": [],\n  \"sudo_events\": [],\n  \"ssh_sessions\": []\n}\n\nOutputs esperados: /tmp/audit/system_logs_<hostname>_<date>.json, /tmp/audit/auth_events_<date>.json\n\n## FASE 2 — ANÁLISE DE ACESSOS\nObjetivo: Auditar logins recentes, comandos sudo, tentativas falhas e sessões ativas.\n\n1. Histórico de logins (últimos 100):\n   last -n 100 -F -w > /tmp/audit/recent_logins_<date>.txt\n\n2. Tentativas de login falhas (últimas 50):\n   lastb -n 50 -F -w > /tmp/audit/failed_attempts_<date>.txt 2>/dev/null\n\n3. Usuários atualmente logados:\n   w -h | awk '{print $1, $3, $5}' > /tmp/audit/active_sessions_<date>.txt\n\n4. Uso de sudo nas últimas 24h:\n   grep sudo /var/log/auth.log | tail -500 > /tmp/audit/sudo_usage_<date>.log\n\n5. Sessões SSH ativas:\n   who | grep pts > /tmp/audit/ssh_sessions_<date>.txt\n\n6. Verificar comandos privilegiados:\n   grep -E 'useradd|usermod|userdel|passwd' /var/log/auth.log | tail -100 > /tmp/audit/privileged_cmds_<date>.log\n\nConsolide em /tmp/audit/access_analysis_<hostname>_<date>.json:\n{\n  \"hostname\": \"<hostname>\",\n  \"active_users\": [],\n  \"recent_logins\": [],\n  \"failed_login_count\": 0,\n  \"sudo_events\": [],\n  \"privileged_changes\": []\n}\n\nOutputs esperados: /tmp/audit/access_analysis_<hostname>_<date>.json, /tmp/audit/failed_logins_<date>.log\n\n## FASE 3 — AUDITORIA DE PERMISSÕES\nObjetivo: Identificar arquivos SUID/SGID, world-writable e permissões inadequadas.\n\n⚠ Use -maxdepth 5 em todos os comandos find para evitar varreduras excessivas.\n\n1. Arquivos com SUID bit:\n   find / -maxdepth 5 -type f -perm -4000 -ls 2>/dev/null | awk '{print $3, $5, $6, $11}' > /tmp/audit/suid_files_<date>.txt\n\n2. Arquivos com SGID bit:\n   find / -maxdepth 5 -type f -perm -2000 -ls 2>/dev/null | awk '{print $3, $5, $6, $11}' > /tmp/audit/sgid_files_<date>.txt\n\n3. Arquivos world-writable (excluindo /proc e /sys):\n   find / -maxdepth 5 -type f -perm -002 ! -path '/proc/*' ! -path '/sys/*' 2>/dev/null > /tmp/audit/world_writable_<date>.txt\n\n4. Arquivos sem dono (orphaned):\n   find / -maxdepth 5 \\( -nouser -o -nogroup \\) 2>/dev/null > /tmp/audit/orphaned_files_<date>.txt\n\n5. Chaves SSH expostas:\n   find /home /root -name 'authorized_keys' -o -name 'id_rsa' 2>/dev/null > /tmp/audit/ssh_keys_<date>.txt\n\n6. Permissões de arquivos críticos:\n   stat /etc/passwd /etc/shadow /etc/sudoers /etc/ssh/sshd_config 2>/dev/null > /tmp/audit/critical_perms_<date>.txt\n\nConsolide em /tmp/audit/suid_files_<date>.json e /tmp/audit/dangerous_permissions_<date>.json\n\nClassifique cada achado por severidade:\n- CRITICAL: SUID em arquivo world-writable, shadow legível por não-root\n- HIGH: SUID/SGID em binários não-padrão\n- MEDIUM: Arquivos world-writable em diretórios sensíveis\n- LOW: Arquivos orphaned, permissões não-padrão em configs\n\nOutputs esperados: /tmp/audit/suid_files_<date>.json, /tmp/audit/dangerous_permissions_<date>.json\n\n## FASE 4 — VERIFICAÇÃO DE COMPLIANCE\nObjetivo: Checar conformidade com PCI-DSS, HIPAA, LGPD e ISO 27001.\n\n### PCI-DSS v4.0\n\nReq 2.2.4 — Desabilitar serviços desnecessários:\n  systemctl list-units --type=service --state=running > /tmp/audit/running_services_<date>.txt\n\nReq 8.2.1 — Autenticação forte:\n  grep -E '^PASS_MAX_DAYS|^PASS_MIN_DAYS|^PASS_MIN_LEN|^PASS_WARN_AGE' /etc/login.defs\n\nReq 8.3.2 — MFA para acesso administrativo:\n  grep -r 'pam_google_authenticator\\|pam_duo\\|pam_oath' /etc/pam.d/ 2>/dev/null\n\nReq 10.2 — Trilhas de auditoria automatizadas:\n  systemctl is-active auditd rsyslog 2>/dev/null\n\nReq 10.3.4 — Retenção de logs (mínimo 90 dias):\n  grep -E 'rotate|maxage' /etc/logrotate.conf /etc/logrotate.d/* 2>/dev/null | head -20\n\n### HIPAA Security Rule\n\n164.308(a)(1) — Gestão de segurança:\n  grep -E '^PASS_MAX_DAYS|^INACTIVE|^EXPIRE' /etc/login.defs\n\n164.312(a)(1) — Controles de acesso:\n  cat /etc/security/access.conf 2>/dev/null | grep -v '^#'\n\n164.312(b) — Controles de auditoria:\n  ls -la /var/log/auth.log /var/log/syslog /var/log/audit/ 2>/dev/null\n\n### LGPD (Lei 13.709/2018)\n\nArt. 46 — Medidas de segurança e proteção:\n  ufw status verbose 2>/dev/null || iptables -L -n -v 2>/dev/null\n\nArt. 47 — Agentes de proteção de dados:\n  cat /etc/passwd | grep -E 'sudo|admin|root' | awk -F: '{print $1, $3, $7}'\n\nArt. 48 — Notificação de incidentes:\n  grep -E 'fail2ban|intrusion|breach' /var/log/syslog 2>/dev/null | tail -50\n\n### ISO 27001:2022\n\nA.9.2 — Gestão de acesso de usuários:\n  awk -F: '($3 >= 1000) {print $1, $3, $6, $7}' /etc/passwd\n  grep -v '*' /etc/shadow | grep -v '!' | awk -F: '{print $1, \"has_password\"}' 2>/dev/null\n\nA.9.4 — Controle de acesso a sistemas e aplicações:\n  grep -E '^PermitRootLogin|^PasswordAuthentication|^PubkeyAuthentication|^MaxAuthTries|^Port' /etc/ssh/sshd_config\n\nA.12.4 — Registro e monitoramento:\n  systemctl is-active rsyslog syslog auditd 2>/dev/null\n\n### CIS Controls v8\n\nHardening básico:\n  getenforce 2>/dev/null || echo 'SELinux: Not installed'\n  aa-status 2>/dev/null || echo 'AppArmor: Not installed'\n  ufw status 2>/dev/null || echo 'UFW: Not available'\n\nConsolide em /tmp/audit/compliance_score_<standard>_<date>.json:\n{\n  \"standard\": \"PCI-DSS v4.0\",\n  \"total_checks\": 0,\n  \"passed\": 0,\n  \"failed\": 0,\n  \"score_percent\": 0,\n  \"findings\": []\n}\n\nOutputs esperados: /tmp/audit/compliance_score_<standard>_<date>.json, /tmp/audit/findings_<date>.json\n\n## FASE 5 — DETECÇÃO DE ANOMALIAS\nObjetivo: Identificar comportamentos suspeitos, logins anômalos e atividades fora do padrão.\n\n1. Logins em horário incomum (00h-06h):\n   last | awk '$5 ~ /(00|01|02|03|04|05):/ {print $0}' > /tmp/audit/logins_unusual_hours_<date>.txt\n\n2. IPs externos que acessaram o sistema:\n   last | awk '{print $3}' | grep -v localhost | grep -E '^[0-9]+\\.' | sort -u > /tmp/audit/external_ips_<date>.txt\n\n3. IPs com múltiplas falhas (potencial brute-force):\n   lastb | awk '{print $3}' | sort | uniq -c | sort -rn | head -20 > /tmp/audit/brute_force_ips_<date>.txt\n\n4. Verificar bloqueios ativos no fail2ban:\n   fail2ban-client status 2>/dev/null > /tmp/audit/fail2ban_status_<date>.txt\n   fail2ban-client status sshd 2>/dev/null >> /tmp/audit/fail2ban_status_<date>.txt\n\n5. Comandos de escalação de privilégio suspeitos:\n   grep -E 'useradd|usermod|userdel|chpasswd|passwd' /var/log/auth.log | tail -100 > /tmp/audit/priv_escalation_<date>.log\n\n6. Processos rodando como root que não deveriam:\n   ps aux | awk '$1==\"root\" {print $1, $2, $11}' | grep -v -E '^root (PID|[0-9]+\\s+(/sbin|/usr/sbin|/bin|/usr/bin|\\[|init|kthread))' > /tmp/audit/root_processes_<date>.txt\n\nClassifique anomalias por padrão:\n- CRITICAL: root login via SSH, conta sem senha com shell ativo\n- HIGH: Brute-force ativo (>5 tentativas/10min do mesmo IP), login fora de horário comercial\n- MEDIUM: IPs externos não reconhecidos, comandos de adição de usuário sem ticket\n- LOW: Logins em horário incomum de IPs conhecidos\n\nConsolide em /tmp/audit/anomalies_<hostname>_<date>.json:\n{\n  \"hostname\": \"<hostname>\",\n  \"scan_time\": \"<ISO8601>\",\n  \"suspicious_ips\": [],\n  \"unusual_logins\": [],\n  \"brute_force_attempts\": [],\n  \"privilege_escalations\": [],\n  \"anomaly_count\": 0\n}\n\nOutputs esperados: /tmp/audit/anomalies_<hostname>_<date>.json, /tmp/audit/suspicious_ips_<date>.txt\n\n## FASE 6 — GERAÇÃO DE RELATÓRIO\nGere relatório HTML executivo consolidando todos os findings das fases anteriores.\n\nEstrutura do relatório HTML:\n\n1. Cabeçalho\n   - Hostname, data/hora da auditoria, auditor (OpenAssist)\n   - Score geral de segurança (0-100)\n   - Semáforo: VERDE (80-100), AMARELO (50-79), VERMELHO (0-49)\n\n2. Sumário Executivo\n   - Total de findings por severidade (Critical / High / Medium / Low)\n   - Top 5 riscos identificados\n   - Ação imediata requerida (se Critical > 0)\n\n3. Score por Framework\n   - PCI-DSS v4.0: X/100\n   - HIPAA: X/100\n   - LGPD: X/100\n   - ISO 27001:2022: X/100\n   - CIS Controls v8: X/100\n\n4. Findings Detalhados\n   Para cada finding:\n   - ID (ex: AUD-001), Severidade, Framework afetado\n   - Descrição do problema\n   - Evidência coletada (trecho do comando)\n   - Recomendação de remediação\n   - Prazo: IMEDIATO / 48h / 7 dias / 30 dias\n\n5. Análise de Acessos\n   - Tabela de logins recentes\n   - IPs suspeitos identificados\n   - Anomalias detectadas\n\n6. Status de Compliance\n   - Checklist por framework com PASS/FAIL/WARN por controle\n\n7. Plano de Remediação Priorizado\n   - Ordenado por severidade e impacto\n   - Estimativa de esforço por item\n\n8. Rodapé\n   - Gerado por OpenAssist | perito.digital\n   - Timestamp de geração\n\nArquivo final: /tmp/audit/audit_report_<hostname>_<date>.html\nTambém gere: /tmp/audit/findings_detailed_<date>.json com todos os findings estruturados\n\n## NÍVEIS DE SEVERIDADE\n\n| Nível    | Score    | SLA                    | Exemplos |\n|----------|----------|------------------------|----------|\n| CRITICAL | 9.0-10.0 | Remediação imediata    | Root SSH ativo, SUID world-writable, conta sem senha |\n| HIGH     | 7.0-8.9  | Remediação em 48h      | Política de senha fraca, serviços desnecessários |\n| MEDIUM   | 4.0-6.9  | Remediação em 7 dias   | Retenção de log insuficiente, FIM ausente |\n| LOW      | 0.1-3.9  | Remediação em 30 dias  | Documentação desatualizada, banners ausentes |\n\n## CHAIN-OF-THOUGHT OBRIGATÓRIO\nAntes de cada comando, raciocine:\n1. Este comando coleta dados sem modificar o sistema?\n2. O output será redirecionado para /tmp/audit/ em formato estruturado?\n3. Dados sensíveis (senhas, hashes) serão redacted antes de salvar?\n4. O timeout de 600 segundos por fase está sendo respeitado?\n\n## CRITÉRIOS DE PARADA\n- Todas as 6 fases executadas e outputs gerados\n- Relatório HTML final entregue em /tmp/audit/\n- Score de compliance calculado para cada framework\n- Usuário solicita encerramento\n- Timeout global de 30 iterações atingido\n",
+  "instructions_file": "SKILL-AUDIT.md",
+  "author": {
+    "name": "Osvaldo J. Filho",
+    "linkedin": "linkedin.com/in/ojaneri",
+    "instagram": "instagram.com/peritosegurancadainformacao",
+    "website": "https://perito.digital"
+  },
+  "last_updated": "2026-03-15"
+}
