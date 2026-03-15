@@ -17,8 +17,8 @@ import signal
 # Configurações iniciais
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
 SESSION_FILE = "SESSION.md"
-CONFIG_FILE = os.path.expanduser("~/.openrouter.cfg")
-MODEL_CONFIG_FILE = os.path.expanduser("~/.openrouter_model.cfg")
+CONFIG_FILE = os.path.expanduser("~/.openassist.cfg")
+MODEL_CONFIG_FILE = os.path.expanduser("~/.openassist_model.cfg")
 DEFAULT_MODEL = "qwen/qwen3-coder:free"
 
 # Limites de contexto (em tokens aproximados)
@@ -1124,7 +1124,7 @@ def chat_loop(first_prompt=""):
     
     # Banner com créditos
     print("\033[96m" + "="*60 + "\033[0m")
-    print("\033[96m🤖 OpenRouter AGENT - Assistente Linux Autônomo\033[0m")
+    print("\033[96m🤖 OpenAssist - Autonomous Linux AI Assistant\033[0m")
     print("\033[96m" + "="*60 + "\033[0m")
     print(f"\033[90mModelo ativo:\033[0m {active_model} ({model_source})")
     print(f"\033[90mModo:\033[0m ⚡ Um comando por vez (JSON estruturado)")
