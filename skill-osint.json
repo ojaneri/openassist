@@ -1,0 +1,125 @@
+{
+  "name": "osint",
+  "version": "1.0",
+  "description": "Coleta autônoma de inteligência de fontes abertas (OSINT) sobre alvos humanos, organizacionais ou de infraestrutura. Segue o OSINT Framework, PTES Recon e diretrizes de OPSEC, com outputs estruturados para consumo por agentes de IA ou plataformas TIP.",
+  "frameworks": [
+    "OSINT Framework",
+    "PTES - Reconnaissance",
+    "OPSEC Guidelines",
+    "MITRE ATT&CK - Reconnaissance (TA0043)"
+  ],
+  "type": "intelligence_gathering",
+  "approval_required": false,
+  "max_iterations": 40,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Target Profiling",
+      "mitre_tactics": ["Reconnaissance"],
+      "mitre_techniques": ["T1589", "T1591"],
+      "description": "Definição do alvo e coleta de identidade digital: domínios, emails, usernames, redes sociais e dados públicos",
+      "tools": ["theHarvester", "Sherlock", "Holehe", "Maigret"],
+      "outputs": ["target_profile.json", "emails_found.json", "usernames_found.json"]
+    },
+    {
+      "id": 2,
+      "name": "Infrastructure Mapping",
+      "mitre_tactics": ["Reconnaissance"],
+      "mitre_techniques": ["T1590", "T1596", "T1595.001"],
+      "description": "Mapeamento de infraestrutura: IPs, ASNs, subdomínios, certificados SSL, registros DNS e tecnologias expostas",
+      "tools": ["Amass", "Subfinder", "Shodan CLI", "dnsx", "httpx", "Censys CLI"],
+      "outputs": ["subdomains.json", "ips_asns.json", "dns_records.json", "exposed_services.json"]
+    },
+    {
+      "id": 3,
+      "name": "Leaked Credentials & Exposure",
+      "mitre_tactics": ["Reconnaissance"],
+      "mitre_techniques": ["T1589.001", "T1589.002", "T1596.004"],
+      "description": "Verificação de credenciais e dados vazados em breaches públicos, pastes e repositórios",
+      "tools": ["h8mail", "GitDorker", "truffleHog", "gitleaks"],
+      "outputs": ["leaked_credentials.json", "git_exposures.json", "paste_findings.json"],
+      "requires_approval": false
+    },
+    {
+      "id": 4,
+      "name": "Web & Social Footprint",
+      "mitre_tactics": ["Reconnaissance"],
+      "mitre_techniques": ["T1593", "T1594"],
+      "description": "Análise de presença web, redes sociais, metadados de documentos e Google Dorking",
+      "tools": ["SpiderFoot", "Photon", "metagoofil", "exiftool", "waybackurls"],
+      "outputs": ["social_footprint.json", "web_links.json", "metadata_docs.json", "wayback_urls.txt"]
+    },
+    {
+      "id": 5,
+      "name": "Correlation & Analysis",
+      "mitre_tactics": ["Reconnaissance"],
+      "mitre_techniques": ["T1589", "T1590", "T1591"],
+      "description": "Correlação de todos os dados coletados, eliminação de falsos positivos e análise de relacionamentos entre entidades",
+      "tools": ["Maltego CE (CLI)", "SpiderFoot HX API"],
+      "outputs": ["entities_graph.json", "correlations.json", "iocs.json"]
+    },
+    {
+      "id": 6,
+      "name": "Reporting",
+      "description": "Geração de relatório HTML de inteligência com timeline, mapa de entidades, score de exposição e recomendações de OPSEC",
+      "outputs": ["osint_report_<target>_<date>.html", "intelligence_summary.json", "iocs_stix2.json"]
+    }
+  ],
+  "guardrails": {
+    "rate_limiting": {
+      "max_requests_per_second": 5,
+      "concurrent_connections": 3,
+      "delay_between_queries_ms": 500
+    },
+    "privacy": {
+      "forbidden_actions": [
+        "acessar sistemas sem autorização",
+        "utilizar dados de terceiros sem consentimento",
+        "realizar scraping que viole ToS de plataformas",
+        "coletar dados de menores de idade",
+        "cruzar dados para fins de doxing não autorizado"
+      ],
+      "require_scope_confirmation": true
+    },
+    "output_formats": {
+      "required": ["json"],
+      "optional": ["html", "stix2"],
+      "forbidden": ["stdout_raw", "plaintext_dump"]
+    },
+    "passive_only_by_default": true
+  },
+  "key_commands": {
+    "target_profiling": {
+      "harvest_emails": "theharvester -d <domain> -b google,bing,linkedin,duckduckgo -f /tmp/osint/harvest.json",
+      "username_search": "sherlock <username> --output /tmp/osint/sherlock.txt --print-found",
+      "email_breach_check": "holehe <email> --only-used > /tmp/osint/holehe.txt",
+      "multi_platform_user": "maigret <username> --json /tmp/osint/maigret.json"
+    },
+    "infrastructure_mapping": {
+      "subdomain_enum": "subfinder -d <domain> -o /tmp/osint/subdomains.txt -all",
+      "amass_passive": "amass enum -passive -d <domain> -json /tmp/osint/amass.json",
+      "shodan_query": "shodan search 'org:\"<org>\"' --fields ip_str,port,org,hostnames --separator , > /tmp/osint/shodan.csv",
+      "dns_resolve": "dnsx -l /tmp/osint/subdomains.txt -json -o /tmp/osint/dns_records.json",
+      "http_probe": "httpx -l /tmp/osint/subdomains.txt -json -o /tmp/osint/httpx.json -title -tech-detect -status-code"
+    },
+    "leaked_credentials": {
+      "email_leaks": "h8mail -t <email> -o /tmp/osint/h8mail.json --json",
+      "git_secrets": "gitleaks detect --source <repo_path> --report-format json --report-path /tmp/osint/gitleaks.json",
+      "git_dork": "python3 gitdorker.py -tf <token_file> -q <org_or_user> -d dorks.txt -o /tmp/osint/gitdorker.json"
+    },
+    "web_footprint": {
+      "spiderfoot": "sfcli.py -s <target> -m sfp_shodan,sfp_whois,sfp_dns,sfp_pgp,sfp_pastebin -F json -o /tmp/osint/spiderfoot.json",
+      "metadata_docs": "metagoofil -d <domain> -t pdf,docx,xlsx -o /tmp/osint/docs/ -f /tmp/osint/metadata.json",
+      "wayback_urls": "waybackurls <domain> | tee /tmp/osint/wayback_urls.txt",
+      "photon_crawl": "python3 photon.py -u <url> -o /tmp/osint/photon/ --only-urls"
+    }
+  },
+  "instructions": "# SKILL OSINT — Inteligência de Fontes Abertas\n\n## OBJETIVO\nRealizar coleta passiva e semi-passiva de inteligência sobre um alvo (domínio, organização, pessoa ou infraestrutura) utilizando exclusivamente fontes abertas e públicas, com outputs estruturados e rastreáveis.\n\n## ESCOPO E ÉTICA\n- Este skill é PASSIVO por padrão. Nenhuma interação direta com sistemas do alvo é realizada sem aprovação explícita.\n- NUNCA colete dados com intenção de doxing, assédio ou fins ilegais.\n- SEMPRE confirme com o usuário o escopo autorizado antes de iniciar.\n- Respeite os Termos de Serviço das plataformas utilizadas.\n- Em caso de dúvida sobre a legalidade, PARE e consulte o usuário.\n\n## VARIÁVEIS DE ENTRADA\nAntes de iniciar, colete do usuário:\n- `<target>` — domínio, IP, organização, nome de pessoa ou username\n- `<scope>` — o que está autorizado (ex: apenas infraestrutura, incluir pessoas, incluir credenciais)\n- `<output_dir>` — diretório de saída (padrão: /tmp/osint/)\n\nCrie o diretório: mkdir -p /tmp/osint/\n\n## FASE 1 — TARGET PROFILING\nObjetivo: Construir o perfil inicial do alvo com dados de identidade digital.\n\n1. Coleta de emails e dados públicos via harvesting:\n   theharvester -d <domain> -b google,bing,linkedin,duckduckgo -f /tmp/osint/harvest.json\n\n2. Verificar presença de usernames em redes sociais:\n   sherlock <username> --output /tmp/osint/sherlock.txt --print-found\n\n3. Verificar se email aparece em serviços online:\n   holehe <email> --only-used > /tmp/osint/holehe.txt\n\n4. Busca multi-plataforma avançada por username:\n   maigret <username> --json /tmp/osint/maigret.json\n\nConsolide em /tmp/osint/target_profile.json:\n{\n  \"target\": \"<target>\",\n  \"emails\": [],\n  \"usernames\": [],\n  \"social_profiles\": [],\n  \"phones\": []\n}\n\nOutputs esperados: /tmp/osint/target_profile.json, /tmp/osint/emails_found.json\n\n## FASE 2 — INFRASTRUCTURE MAPPING\nObjetivo: Mapear a infraestrutura pública associada ao alvo.\n\n1. Enumeração passiva de subdomínios:\n   subfinder -d <domain> -o /tmp/osint/subdomains.txt -all\n   amass enum -passive -d <domain> -json /tmp/osint/amass.json\n\n2. Resolução DNS e identificação de tecnologias:\n   dnsx -l /tmp/osint/subdomains.txt -json -o /tmp/osint/dns_records.json\n   httpx -l /tmp/osint/subdomains.txt -json -o /tmp/osint/httpx.json -title -tech-detect -status-code\n\n3. Pesquisa no Shodan (passive):\n   shodan search 'org:\"<org>\"' --fields ip_str,port,org,hostnames --separator , > /tmp/osint/shodan.csv\n\n4. Consolide ASNs e ranges de IP em /tmp/osint/ips_asns.json\n\nOutputs esperados: /tmp/osint/subdomains.json, /tmp/osint/dns_records.json, /tmp/osint/exposed_services.json\n\n## FASE 3 — LEAKED CREDENTIALS & EXPOSURE\nObjetivo: Identificar vazamentos de credenciais e exposições em repositórios públicos.\n\n⚠ Colete apenas o que está publicamente disponível. Não acesse sistemas privados.\n\n1. Verificar email em bases de breach:\n   h8mail -t <email> -o /tmp/osint/h8mail.json --json\n\n2. Buscar segredos em repositórios Git públicos:\n   gitleaks detect --source <repo_path> --report-format json --report-path /tmp/osint/gitleaks.json\n\n3. Google Dorking em GitHub:\n   python3 gitdorker.py -tf <token_file> -q <org_or_user> -d dorks.txt -o /tmp/osint/gitdorker.json\n\nOutputs esperados: /tmp/osint/leaked_credentials.json, /tmp/osint/git_exposures.json\n\n## FASE 4 — WEB & SOCIAL FOOTPRINT\nObjetivo: Analisar presença web, metadados de documentos e URLs históricas.\n\n1. Automação OSINT com SpiderFoot:\n   sfcli.py -s <target> -m sfp_shodan,sfp_whois,sfp_dns,sfp_pgp,sfp_pastebin -F json -o /tmp/osint/spiderfoot.json\n\n2. Extração de metadados de documentos públicos:\n   metagoofil -d <domain> -t pdf,docx,xlsx -o /tmp/osint/docs/ -f /tmp/osint/metadata.json\n\n3. URLs históricas via Wayback Machine:\n   waybackurls <domain> | tee /tmp/osint/wayback_urls.txt\n\n4. Crawl de links e emails na superfície web:\n   python3 photon.py -u <url> -o /tmp/osint/photon/ --only-urls\n\nOutputs esperados: /tmp/osint/social_footprint.json, /tmp/osint/metadata_docs.json, /tmp/osint/wayback_urls.txt\n\n## FASE 5 — CORRELATION & ANALYSIS\nObjetivo: Correlacionar todos os dados coletados e identificar relacionamentos entre entidades.\n\n1. Construa o grafo de entidades a partir dos outputs anteriores:\n   - Entidades: domínios, IPs, emails, usernames, organizações, pessoas\n   - Relacionamentos: quem registrou o domínio, qual IP hospeda qual serviço, etc.\n\n2. Identifique padrões:\n   - Emails que aparecem em múltiplas fontes\n   - IPs compartilhados entre domínios\n   - Credenciais reutilizadas\n   - Infraestrutura sobreposta\n\n3. Gere lista de IOCs (Indicators of Compromise/Interest):\n   - IPs suspeitos, domínios relacionados, hashes de documentos, emails\n\n4. Salve em /tmp/osint/correlations.json e /tmp/osint/iocs.json\n\nOutputs esperados: /tmp/osint/entities_graph.json, /tmp/osint/correlations.json, /tmp/osint/iocs.json\n\n## FASE 6 — REPORTING\nGere relatório HTML profissional consolidando toda a inteligência coletada.\n\nEstrutura do relatório:\n1. Sumário executivo\n   - Score de exposição do alvo (0-100)\n   - Principais achados por categoria\n   - Nível de risco estimado\n\n2. Perfil do alvo\n   - Identidade digital mapeada\n   - Infraestrutura associada\n\n3. Achados por fase\n   - Fase 1: Identidade e presença online\n   - Fase 2: Infraestrutura exposta\n   - Fase 3: Dados vazados\n   - Fase 4: Footprint web/social\n\n4. Grafo de relacionamentos (tabela de entidades)\n\n5. IOCs identificados\n\n6. Recomendações de OPSEC e remediação\n   - Como reduzir a superfície de exposição\n   - Prioridade de ação por criticidade\n\nArquivo final: /tmp/osint/osint_report_<target>_<YYYY-MM-DD>.html\nTambém gere:\n- /tmp/osint/intelligence_summary.json — resumo estruturado\n- /tmp/osint/iocs_stix2.json — IOCs em formato STIX 2.1 para ingestão em SIEMs/TIPs\n\n## CHAIN-OF-THOUGHT OBRIGATÓRIO\nAntes de cada ação, raciocine:\n1. Esta coleta está dentro do escopo autorizado pelo usuário?\n2. A fonte é pública e de acesso legal?\n3. Existe risco de impacto em terceiros não autorizados?\n4. O output será capturado em formato estruturado?\n\n## CRITÉRIOS DE PARADA\n- Todas as fases executadas e outputs gerados\n- Relatório final entregue\n- Score de exposição calculado\n- Usuário solicita encerramento\n- Nenhum dado novo sendo descoberto (saturação de fontes)\n",
+  "author": {
+    "name": "Osvaldo J. Filho",
+    "linkedin": "linkedin.com/in/ojaneri",
+    "instagram": "instagram.com/peritosegurancadainformacao",
+    "website": "https://perito.digital"
+  },
+  "last_updated": "2026-03-15"
+}

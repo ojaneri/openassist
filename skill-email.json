@@ -1,0 +1,142 @@
+{
+  "name": "email",
+  "version": "1.0",
+  "description": "Sistema automatizado de envio de e-mails via linha de comando usando SMTP, suportando anexos, HTML, texto puro e múltiplos destinatários.",
+  "frameworks": [
+    "SMTP Protocol",
+    "RFC 5321",
+    "MIME Standards"
+  ],
+  "type": "automation",
+  "approval_required": false,
+  "max_iterations": 10,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Configuração",
+      "description": "Detectar provedor de e-mail e configurar SMTP automaticamente",
+      "tools": ["Python smtplib", "email.mime"],
+      "outputs": ["smtp_config.json"]
+    },
+    {
+      "id": 2,
+      "name": "Composição",
+      "description": "Criar corpo do e-mail em texto puro ou HTML",
+      "tools": ["Python email.mime.text", "email.mime.multipart"],
+      "outputs": ["email_draft_<timestamp>.txt"]
+    },
+    {
+      "id": 3,
+      "name": "Anexos",
+      "description": "Adicionar arquivos anexos ao e-mail",
+      "tools": ["Python email.mime.base", "base64"],
+      "outputs": ["attachments_list.json"]
+    },
+    {
+      "id": 4,
+      "name": "Envio",
+      "description": "Autenticar e enviar e-mail via SMTP com TLS obrigatório",
+      "tools": ["Python smtplib"],
+      "outputs": ["send_log_<timestamp>.json"],
+      "requires_approval": false
+    },
+    {
+      "id": 5,
+      "name": "Confirmação",
+      "description": "Verificar status de envio e gerar relatório",
+      "outputs": ["send_report_<recipient>_<date>.json"]
+    }
+  ],
+  "guardrails": {
+    "rate_limiting": {
+      "max_requests_per_second": 1,
+      "concurrent_connections": 1,
+      "delay_between_emails": 2
+    },
+    "email_limits": {
+      "max_emails_per_execution": 10,
+      "max_attachment_size_mb": 25,
+      "max_recipients_per_email": 50
+    },
+    "security": {
+      "require_tls": true,
+      "password_storage": "environment_variable",
+      "forbidden_actions": [
+        "store_password_in_code",
+        "log_credentials",
+        "disable_tls",
+        "hardcode_credentials"
+      ]
+    },
+    "output_formats": {
+      "required": ["json"],
+      "forbidden": ["stdout_raw", "password_in_logs"]
+    }
+  },
+  "smtp_providers": {
+    "gmail.com": {
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 587,
+      "use_tls": true,
+      "auth_note": "Requer senha de app (App Password), não senha normal. Ative em: Conta Google > Segurança > Senhas de app"
+    },
+    "outlook.com": {
+      "smtp_server": "smtp-mail.outlook.com",
+      "smtp_port": 587,
+      "use_tls": true
+    },
+    "hotmail.com": {
+      "smtp_server": "smtp-mail.outlook.com",
+      "smtp_port": 587,
+      "use_tls": true
+    },
+    "yahoo.com": {
+      "smtp_server": "smtp.mail.yahoo.com",
+      "smtp_port": 587,
+      "use_tls": true
+    },
+    "icloud.com": {
+      "smtp_server": "smtp.mail.me.com",
+      "smtp_port": 587,
+      "use_tls": true,
+      "auth_note": "Requer senha específica de app gerada em appleid.apple.com"
+    }
+  },
+  "environment_variables": {
+    "EMAIL_SENDER": "Endereço de e-mail do remetente",
+    "EMAIL_PASSWORD": "Senha ou App Password do e-mail",
+    "SMTP_SERVER": "(Opcional) Servidor SMTP customizado — sobrepõe detecção automática",
+    "SMTP_PORT": "(Opcional) Porta SMTP customizada — padrão 587"
+  },
+  "key_commands": {
+    "detection": {
+      "validate_email": "python3 -c \"import re; email='<email>'; print('valid' if re.match(r'^[\\w\\.-]+@[\\w\\.-]+\\.\\w+$', email) else 'invalid')\"",
+      "check_env": "env | grep -E '^EMAIL_|^SMTP_'",
+      "test_connection": "python3 -c \"import smtplib; s=smtplib.SMTP('<smtp_server>', 587); s.starttls(); print('OK'); s.quit()\""
+    },
+    "simple_send": {
+      "text_only": "python3 send_email.py --from <sender> --to <recipient> --subject '<subject>' --body '<body>'",
+      "with_cc": "python3 send_email.py --from <sender> --to <recipient> --cc <cc_email> --subject '<subject>' --body '<body>'"
+    },
+    "html_send": {
+      "from_file": "python3 send_email.py --from <sender> --to <recipient> --subject '<subject>' --html <html_file>",
+      "inline": "python3 send_email.py --from <sender> --to <recipient> --subject '<subject>' --html-inline '<html_content>'"
+    },
+    "with_attachments": {
+      "single": "python3 send_email.py --from <sender> --to <recipient> --subject '<subject>' --body '<body>' --attach <file>",
+      "multiple": "python3 send_email.py --from <sender> --to <recipient> --subject '<subject>' --body '<body>' --attach <file1> <file2> <file3>"
+    },
+    "bulk_send": {
+      "from_csv": "python3 send_bulk_emails.py --csv <recipients.csv> --template <template.html> --subject '<subject>'",
+      "with_delay": "python3 send_bulk_emails.py --csv <recipients.csv> --subject '<subject>' --delay 2"
+    }
+  },
+  "instructions": "# SKILL EMAIL — Envio Automatizado de E-mails via SMTP\n\n## OBJETIVO\nEnviar e-mails via linha de comando usando Python smtplib, com suporte a texto puro, HTML, anexos e múltiplos destinatários. Toda autenticação é feita via variáveis de ambiente — nenhuma credencial deve aparecer em código ou logs.\n\n## PRÉ-REQUISITOS\nAntes de iniciar, verifique se as variáveis de ambiente estão configuradas:\n\n```bash\nenv | grep -E '^EMAIL_|^SMTP_'\n```\n\nVariáveis necessárias:\n- `EMAIL_SENDER` — remetente (ex: seu@gmail.com)\n- `EMAIL_PASSWORD` — senha ou App Password\n- `SMTP_SERVER` — (opcional) servidor customizado\n- `SMTP_PORT` — (opcional) porta customizada, padrão 587\n\nSe ausentes, instrua o usuário a exportar antes de prosseguir:\n```bash\nexport EMAIL_SENDER=\"seu@email.com\"\nexport EMAIL_PASSWORD=\"sua_app_password\"\n```\n\n## FASE 1 — CONFIGURAÇÃO\nObjetivo: Detectar provedor e configurar SMTP automaticamente.\n\n1. Valide o e-mail do remetente:\n```python\nimport re\nemail = os.environ['EMAIL_SENDER']\nassert re.match(r'^[\\w\\.-]+@[\\w\\.-]+\\.\\w+$', email), 'E-mail inválido'\n```\n\n2. Detecte o provedor pelo domínio e selecione configuração SMTP:\n```python\nSMTP_PROVIDERS = {\n    'gmail.com':   ('smtp.gmail.com', 587),\n    'outlook.com': ('smtp-mail.outlook.com', 587),\n    'hotmail.com': ('smtp-mail.outlook.com', 587),\n    'yahoo.com':   ('smtp.mail.yahoo.com', 587),\n    'icloud.com':  ('smtp.mail.me.com', 587),\n}\ndomain = email.split('@')[1]\nsmtp_server, smtp_port = SMTP_PROVIDERS.get(domain, (\n    os.environ.get('SMTP_SERVER', 'smtp.' + domain),\n    int(os.environ.get('SMTP_PORT', 587))\n))\n```\n\n3. Salve a configuração detectada em /tmp/smtp_config.json\n\n⚠ Gmail exige App Password (não a senha normal). Oriente o usuário se necessário.\n\nOutput esperado: /tmp/smtp_config.json\n\n## FASE 2 — COMPOSIÇÃO\nObjetivo: Criar o e-mail com suporte a texto puro e HTML.\n\nUse sempre MIMEMultipart para compatibilidade:\n```python\nfrom email.mime.multipart import MIMEMultipart\nfrom email.mime.text import MIMEText\n\nmsg = MIMEMultipart('alternative')\nmsg['From'] = sender\nmsg['To'] = ', '.join(recipients)\nmsg['Cc'] = ', '.join(cc_list)  # se houver\nmsg['Subject'] = subject\n\n# Sempre inclua versão texto puro como fallback\nmsg.attach(MIMEText(body_text, 'plain', 'utf-8'))\n\n# HTML opcional\nif html_content:\n    msg.attach(MIMEText(html_content, 'html', 'utf-8'))\n```\n\nSalve rascunho em /tmp/email_draft_<timestamp>.txt para auditoria.\n\nOutput esperado: /tmp/email_draft_<timestamp>.txt\n\n## FASE 3 — ANEXOS\nObjetivo: Adicionar arquivos ao e-mail respeitando o limite de 25MB.\n\n```python\nfrom email.mime.base import MIMEBase\nfrom email import encoders\nimport os\n\nfor filepath in attachments:\n    size_mb = os.path.getsize(filepath) / (1024 * 1024)\n    assert size_mb <= 25, f'Anexo {filepath} excede 25MB ({size_mb:.1f}MB)'\n    \n    with open(filepath, 'rb') as f:\n        part = MIMEBase('application', 'octet-stream')\n        part.set_payload(f.read())\n    encoders.encode_base64(part)\n    part.add_header('Content-Disposition', f'attachment; filename=\"{os.path.basename(filepath)}\"')\n    msg.attach(part)\n```\n\nSalve lista de anexos em /tmp/attachments_list.json\n\nOutput esperado: /tmp/attachments_list.json\n\n## FASE 4 — ENVIO\nObjetivo: Autenticar via TLS e enviar o e-mail.\n\nTLS é OBRIGATÓRIO — nunca envie sem criptografia:\n```python\nimport smtplib\nimport json\nfrom datetime import datetime\n\nlog = {'timestamp': datetime.now().isoformat(), 'status': None, 'error': None}\n\ntry:\n    with smtplib.SMTP(smtp_server, smtp_port) as server:\n        server.ehlo()\n        server.starttls()  # OBRIGATÓRIO\n        server.ehlo()\n        server.login(sender, os.environ['EMAIL_PASSWORD'])  # Sempre de env var\n        all_recipients = recipients + cc_list + bcc_list\n        server.sendmail(sender, all_recipients, msg.as_string())\n        log['status'] = 'sent'\nexcept Exception as e:\n    log['status'] = 'failed'\n    log['error'] = str(e)  # Nunca logar credenciais\nfinally:\n    with open(f'/tmp/send_log_{timestamp}.json', 'w') as f:\n        json.dump(log, f)\n```\n\nOutput esperado: /tmp/send_log_<timestamp>.json\n\n## FASE 5 — CONFIRMAÇÃO\nObjetivo: Verificar resultado e gerar relatório final.\n\nCrie o relatório consolidado em /tmp/send_report_<recipient>_<date>.json:\n```json\n{\n  \"timestamp\": \"<ISO8601>\",\n  \"sender\": \"<email>\",\n  \"recipients\": [],\n  \"cc\": [],\n  \"subject\": \"<subject>\",\n  \"has_html\": true,\n  \"attachments\": [],\n  \"total_size_mb\": 0.0,\n  \"smtp_server\": \"<server>\",\n  \"status\": \"sent | failed\",\n  \"error\": null\n}\n```\n\nExiba ao usuário:\n- Status do envio\n- Destinatários confirmados\n- Tamanho total (corpo + anexos)\n- Caminho do log de auditoria\n\nOutput esperado: /tmp/send_report_<recipient>_<date>.json\n\n## REGRAS DE SEGURANÇA\n- NUNCA armazene senhas em código, arquivos ou logs\n- SEMPRE use TLS (STARTTLS na porta 587)\n- NUNCA imprima EMAIL_PASSWORD em nenhum output\n- Limite: máximo 10 e-mails por execução, 50 destinatários por e-mail, 25MB por anexo\n- Para envios em massa: respeite delay mínimo de 2 segundos entre e-mails\n\n## CHAIN-OF-THOUGHT OBRIGATÓRIO\nAntes de cada ação, raciocine:\n1. As variáveis de ambiente estão configuradas corretamente?\n2. O TLS está habilitado nesta conexão?\n3. Alguma credencial pode vazar nos logs?\n4. O limite de destinatários/tamanho está sendo respeitado?\n\n## CRITÉRIOS DE PARADA\n- E-mail enviado com sucesso e relatório gerado\n- Erro irrecuperável (credenciais inválidas, servidor inacessível)\n- Limite de e-mails por execução atingido\n- Usuário solicita encerramento\n",
+  "author": {
+    "name": "Osvaldo J. Filho",
+    "linkedin": "linkedin.com/in/ojaneri",
+    "instagram": "instagram.com/peritosegurancadainformacao",
+    "website": "https://perito.digital"
+  },
+  "last_updated": "2026-03-15"
+}

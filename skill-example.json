@@ -1,0 +1,61 @@
+{
+  "name": "example",
+  "version": "1.0",
+  "description": "Skill de exemplo comentada — demonstra todos os campos do framework OpenAssist e serve como template para novos skills.",
+  "frameworks": [
+    "FRAMEWORK_A",
+    "FRAMEWORK_B"
+  ],
+  "type": "general",
+  "approval_required": false,
+  "max_iterations": 20,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Preparation",
+      "description": "Coleta de informações iniciais e validação do ambiente",
+      "tools": ["tool-a", "tool-b"],
+      "outputs": ["output_phase1.json"]
+    },
+    {
+      "id": 2,
+      "name": "Execution",
+      "description": "Execução principal da tarefa",
+      "tools": ["tool-c"],
+      "outputs": ["output_phase2.json"],
+      "requires_approval": false
+    },
+    {
+      "id": 3,
+      "name": "Reporting",
+      "description": "Geração de relatório final com resultados",
+      "outputs": ["report_<target>_<date>.html", "findings.json"]
+    }
+  ],
+  "guardrails": {
+    "rate_limiting": {
+      "max_requests_per_second": 10,
+      "concurrent_connections": 3
+    },
+    "output_formats": {
+      "required": ["json"],
+      "forbidden": ["stdout_raw"]
+    }
+  },
+  "key_commands": {
+    "preparation": {
+      "check_env": "echo 'Environment ready'",
+      "list_targets": "cat /tmp/targets.txt"
+    },
+    "execution": {
+      "run_task": "tool-c --input <target> --output /tmp/output_phase2.json"
+    }
+  },
+  "instructions": "# SKILL EXAMPLE — Template de Skill OpenAssist\n\n## OBJETIVO\nDescreva aqui o objetivo principal desta skill em 1-3 frases.\n\n## REGRAS GERAIS\n- Regra de segurança ou comportamento 1\n- Regra de segurança ou comportamento 2\n- Todo output deve ser salvo em /tmp/ ou diretório definido\n\n## FASE 1 — PREPARATION\nObjetivo: Validar ambiente e coletar informações iniciais.\n\n1. Verificar ambiente:\n   echo 'Environment ready'\n\n2. Listar alvos:\n   cat /tmp/targets.txt\n\nOutputs esperados: /tmp/output_phase1.json\n\n## FASE 2 — EXECUTION\nObjetivo: Executar a tarefa principal.\n\n1. Executar ferramenta principal:\n   tool-c --input <target> --output /tmp/output_phase2.json\n\nOutputs esperados: /tmp/output_phase2.json\n\n## FASE 3 — REPORTING\nGere um relatório consolidando os resultados das fases anteriores.\n\nEstrutura do relatório:\n1. Sumário executivo\n2. Resultados por fase\n3. Recomendações\n\nArquivo final: report_<target>_<YYYY-MM-DD>.html\nTambém gere: /tmp/findings.json\n\n## CHAIN-OF-THOUGHT OBRIGATÓRIO\nAntes de cada comando, raciocine:\n1. Esta ação está dentro do escopo autorizado?\n2. O output será capturado em formato estruturado?\n3. Precisa de aprovação do usuário?\n\n## CRITÉRIOS DE PARADA\n- Objetivo atingido\n- Relatório final gerado\n- Usuário solicita encerramento\n",
+  "author": {
+    "name": "Seu Nome",
+    "linkedin": "linkedin.com/in/seu-perfil",
+    "website": "https://seu-site.com"
+  },
+  "last_updated": "2026-03-15"
+}
