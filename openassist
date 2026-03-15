@@ -17,8 +17,9 @@ import signal
 # Configurações iniciais
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
 SESSION_FILE = "SESSION.md"
-CONFIG_FILE = os.path.expanduser("~/.openassist.cfg")
-MODEL_CONFIG_FILE = os.path.expanduser("~/.openassist_model.cfg")
+CONFIG_FILE = os.path.expanduser("~/.openassist/config.cfg")
+MODEL_CONFIG_FILE = os.path.expanduser("~/.openassist/model.cfg")
+SKILLS_DIR_USER = os.path.expanduser("~/.openassist")
 DEFAULT_MODEL = "qwen/qwen3-coder:free"
 
 # Limites de contexto (em tokens aproximados)
@@ -33,6 +34,134 @@ USER_CONFIG = {
     'max_iterations': 30,    # Máximo de comandos por tarefa
     'max_output_lines': 50,  # Linhas de output exibidas
 }
+
+# Sistema de Skills
+SKILLS_CACHE = {}
+
+def load_skills():
+    """Carrega arquivos skill-*.json em ~/.openassist/ como skills."""
+    skills = {}
+
+    os.makedirs(SKILLS_DIR_USER, exist_ok=True)
+
+    for filename in os.listdir(SKILLS_DIR_USER):
+        # Apenas arquivos skill-*.json
+        if not filename.startswith("skill-") or not filename.endswith(".json"):
+            continue
+
+        skill_path = os.path.join(SKILLS_DIR_USER, filename)
+        if not os.path.isfile(skill_path):
+            continue
+
+        skill_name = os.path.splitext(filename)[0].lower()
+        skill_name = skill_name.replace("skill-", "")
+
+        try:
+            with open(skill_path, "r", encoding="utf-8") as f:
+                skill_data = json.load(f)
+
+            # Conteúdo para injeção no system prompt vem do campo "instructions"
+            if "instructions" in skill_data:
+                skill_data["content"] = skill_data["instructions"]
+
+            skills[skill_name] = {
+                "name": skill_data.get("name", skill_name),
+                "path": skill_path,
+                "description": skill_data.get("description", f"Skill: {skill_name}"),
+                "version": skill_data.get("version", "1.0"),
+                "frameworks": skill_data.get("frameworks", []),
+                "phases": skill_data.get("phases", []),
+                "type": "json",
+                "full_data": skill_data,
+            }
+        except Exception as e:
+            print(f"\033[91m⚠ Erro ao carregar skill {filename}: {e}\033[0m")
+
+    return skills
+
+def get_skill_content(skill_name):
+    """Retorna o conteúdo completo de uma skill específica."""
+    skills = load_skills()
+    skill = skills.get(skill_name.lower())
+    
+    if skill:
+        return skill["full_data"]
+    return None
+
+def list_available_skills():
+    """Lista todas as skills disponíveis com descrições."""
+    skills = load_skills()
+    return skills
+
+def get_skills_summary_for_prompt():
+    """Gera resumo de skills para incluir no system prompt da IA."""
+    skills = load_skills()
+    
+    if not skills:
+        return ""
+    
+    summary = "\n" + "="*60 + "\n"
+    summary += "📚 SISTEMA DE SKILLS DISPONÍVEIS\n"
+    summary += "="*60 + "\n\n"
+    
+    summary += "Você tem acesso a skills especializadas que contêm metodologias\n"
+    summary += "profissionais, frameworks e comandos estruturados.\n\n"
+    
+    summary += "🎯 SKILLS INSTALADAS:\n\n"
+    
+    for skill_name, skill_info in skills.items():
+        summary += f"📌 SKILL: {skill_name.upper()}\n"
+        summary += f"   Descrição: {skill_info['description']}\n"
+        
+        if skill_info.get('frameworks'):
+            fw_list = ', '.join(skill_info['frameworks'][:4])
+            summary += f"   Frameworks: {fw_list}\n"
+        
+        if skill_info.get('phases'):
+            phase_names = [p.get('name', f"Fase {i+1}") for i, p in enumerate(skill_info['phases'])]
+            summary += f"   Fases: {' → '.join(phase_names)}\n"
+        
+        summary += f"   📄 Arquivo: {skill_info['path']}\n"
+        summary += "\n"
+    
+    summary += "💡 COMO USAR SKILLS:\n\n"
+    summary += "1. IDENTIFICAÇÃO AUTOMÁTICA:\n"
+    summary += "   Quando o usuário solicitar uma tarefa que corresponda a uma skill,\n"
+    summary += "   você DEVE automaticamente:\n"
+    summary += "   a) Identificar qual skill usar\n"
+    summary += "   b) Ler o conteúdo completo da skill com cat\n"
+    summary += "   c) Seguir rigorosamente as instruções da skill\n\n"
+    
+    summary += "2. COMO LER UMA SKILL:\n"
+    summary += "   Use o comando: cat <caminho_do_arquivo_skill>\n"
+    summary += "   Exemplos:\n"
+    
+    # Mostra exemplos para até 2 skills
+    for skill_name, skill_info in list(skills.items())[:2]:
+        summary += f'   • cat {skill_info["path"]}\n'
+        summary += f'     (Carrega skill "{skill_name}")\n'
+    
+    summary += "\n"
+    summary += "3. SEGUIR A SKILL:\n"
+    summary += "   Após ler a skill, você DEVE:\n"
+    summary += "   - Seguir TODAS as instruções/fases na ordem correta\n"
+    summary += "   - Usar os comandos EXATOS especificados\n"
+    summary += "   - Gerar outputs nos formatos especificados\n"
+    summary += "   - Respeitar os guardrails de segurança\n"
+    summary += "   - Aplicar Chain-of-Thought nas decisões\n\n"
+    
+    summary += "4. QUANDO USAR:\n"
+    for skill_name, skill_info in skills.items():
+        desc_short = skill_info['description'][:60] + "..." if len(skill_info['description']) > 60 else skill_info['description']
+        summary += f"   • '{skill_name}': {desc_short}\n"
+    
+    summary += "\n"
+    summary += "⚠️  IMPORTANTE: Ao detectar que uma tarefa requer uma skill,\n"
+    summary += "    carregue-a IMEDIATAMENTE no primeiro comando (cat) antes de\n"
+    summary += "    executar qualquer outra ação.\n"
+    summary += "\n" + "="*60 + "\n\n"
+    
+    return summary
 
 # Créditos
 AUTHOR_NAME = "Osvaldo J. Filho"
@@ -107,7 +236,11 @@ if args:
     else:
         initial_prompt = " ".join(args)
 
-SYSTEM_PROMPT = """Você é um agente autônomo de administração Linux executando em um loop de automação.
+def get_system_prompt():
+    """Gera system prompt dinâmico com skills."""
+    skills_section = get_skills_summary_for_prompt()
+    
+    prompt = """Você é o OpenAssist, um agente autônomo de administração Linux e segurança da informação.
 Sua tarefa é resolver a solicitação do usuário passo a passo usando comandos de terminal.
 
 FORMATO DE RESPOSTA OBRIGATÓRIO:
@@ -126,7 +259,13 @@ Quando a tarefa estiver 100% concluída, retorne:
   "status": "SUMMARY",
   "message": "Explicação detalhada do que foi feito e resultados finais"
 }
-
+"""
+    
+    # Adiciona seção de skills se houver
+    if skills_section:
+        prompt += skills_section
+    
+    prompt += """
 REGRAS ESTRITAS:
 1. APENAS UM objeto JSON por resposta - NUNCA retorne dois ou mais JSONs
 2. SEMPRE em formato JSON válido
@@ -140,12 +279,13 @@ REGRAS ESTRITAS:
 10. NUNCA use comandos interativos como nano, vim, vi, less, more, top, etc
 11. Use comandos não-interativos: echo, cat, tee, sed, awk, grep, etc
 
-IMPORTANTE:
+IMPORTANTE: 
 - Um comando = uma resposta JSON = um objeto
 - Aguarde o output antes de decidir o próximo passo
 - Quando completar o objetivo, envie o JSON com status "SUMMARY"
 - Para criar/editar arquivos, use: echo, cat, tee, sed - NUNCA nano/vim/vi
 - Para ler arquivos: cat, head, tail, grep - NUNCA less/more/nano
+- Se a tarefa corresponder a uma SKILL, carregue-a PRIMEIRO com cat
 
 EXEMPLOS CORRETOS:
 ✓ {"command": "cat file.txt", "explanation": "Ler conteúdo do arquivo"}
@@ -158,9 +298,24 @@ EXEMPLOS INCORRETOS:
 ✗ {"command": "vim file.txt", ...} - comando interativo
 ✗ {"command": "less file.txt", ...} - comando interativo
 """
+    
+    return prompt
+
+# System prompt dinâmico
+SYSTEM_PROMPT = get_system_prompt()
 
 def load_session():
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Verifica se há skill ativa na sessão
+    active_skill = detect_active_skill()
+    if active_skill:
+        skill_content = get_skill_content(active_skill)
+        if skill_content:
+            # Injeta skill no system prompt
+            skill_injection = f"\n\n{'='*60}\nSKILL ATIVA: {active_skill.upper()}\n{'='*60}\n\n{skill_content['content']}\n\n{'='*60}\nVocê DEVE seguir a metodologia e comandos definidos nesta skill.\n{'='*60}\n"
+            messages[0]["content"] = SYSTEM_PROMPT + skill_injection
+    
     if not os.path.exists(SESSION_FILE):
         return messages
     with open(SESSION_FILE, "r", encoding="utf-8") as f:
@@ -175,6 +330,33 @@ def load_session():
     # Gerencia limite de contexto
     messages = manage_context_window(messages)
     return messages
+
+def detect_active_skill():
+    """Detecta se há uma skill ativa na última solicitação do usuário."""
+    if not os.path.exists(SESSION_FILE):
+        return None
+    
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Busca por padrões de ativação de skill
+        patterns = [
+            r'use skill (\w+)',
+            r'usando skill (\w+)',
+            r'com skill (\w+)',
+            r'skill (\w+)',
+            r'/use (\w+)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content.lower())
+            if matches:
+                return matches[-1]  # Retorna a última skill mencionada
+    except:
+        pass
+    
+    return None
 
 def estimate_tokens(text):
     """Estima número de tokens baseado em caracteres."""
@@ -664,6 +846,8 @@ def process_command(user_input):
         print("/help          - Mostra esta ajuda")
         print("/status        - Mostra status da sessão")
         print("/config        - Mostra configurações atuais")
+        print("/skills        - Lista skills disponíveis")
+        print("/use <skill>   - Carrega e mostra instruções de uma skill")
         print("/timeout_cmd N - Define timeout de EXECUÇÃO de comandos shell (ex: /timeout_cmd 300)")
         print("/timeout_api N - Define timeout de CHAMADAS de API (ex: /timeout_api 60)")
         print("/maxiter N     - Define máximo de iterações (ex: /maxiter 50)")
@@ -674,6 +858,111 @@ def process_command(user_input):
         else:
             print("Nenhum comando na whitelist ainda")
         print(f"Arquivo: {CONFIG_FILE}\n")
+        return "_skip_"
+    
+    elif user_input == "/skills":
+        skills = list_available_skills()
+        
+        if not skills:
+            print(f"\n\033[93m📚 Nenhuma skill encontrada em {SKILLS_DIR_USER}\033[0m")
+            print(f"\033[90mCrie skills em formato JSON no diretório acima.\033[0m\n")
+            return "_skip_"
+        
+        print(f"\n\033[96m=== SKILLS DISPONÍVEIS ({len(skills)}) ===\033[0m\n")
+        
+        for skill_name, skill_info in skills.items():
+            print(f"\033[92m📌 {skill_name}\033[0m")
+            print(f"   {skill_info['description']}")
+            
+            if skill_info.get('frameworks'):
+                print(f"   \033[90mFrameworks: {', '.join(skill_info['frameworks'][:3])}\033[0m")
+            
+            if skill_info.get('phases'):
+                phase_count = len(skill_info['phases'])
+                print(f"   \033[90mFases: {phase_count}\033[0m")
+            
+            print(f"   \033[90mVersão: {skill_info.get('version', '1.0')}\033[0m")
+            print()
+        
+        print(f"\033[96mUso:\033[0m /use <nome_skill> para carregar e ver instruções completas")
+        print(f"\033[96mLocalização:\033[0m {SKILLS_DIR_USER}\n")
+        return "_skip_"
+    
+    elif user_input.startswith("/use "):
+        skill_name = user_input.replace("/use ", "").strip()
+        skill_data = get_skill_content(skill_name)
+        
+        if not skill_data:
+            print(f"\n\033[91m✗ Skill '{skill_name}' não encontrada\033[0m")
+            print(f"\033[90mUse /skills para ver skills disponíveis\033[0m\n")
+            return "_skip_"
+        
+        print(f"\n\033[96m{'='*70}\033[0m")
+        print(f"\033[96m📚 SKILL: {skill_data.get('name', skill_name).upper()}\033[0m")
+        print(f"\033[96m{'='*70}\033[0m\n")
+        
+        print(f"\033[92m📋 Descrição:\033[0m")
+        print(f"{skill_data.get('description', 'Sem descrição')}\n")
+        
+        if skill_data.get('frameworks'):
+            print(f"\033[92m🎯 Frameworks:\033[0m")
+            for fw in skill_data['frameworks']:
+                print(f"  • {fw}")
+            print()
+        
+        if skill_data.get('phases'):
+            print(f"\033[92m📊 Fases ({len(skill_data['phases'])}):\033[0m")
+            for i, phase in enumerate(skill_data['phases'], 1):
+                phase_name = phase.get('name', f'Fase {i}')
+                phase_desc = phase.get('description', '')
+                print(f"  {i}. \033[96m{phase_name}\033[0m")
+                if phase_desc:
+                    print(f"     {phase_desc}")
+                
+                if phase.get('tools'):
+                    tools_str = ', '.join(phase['tools'][:5])
+                    if len(phase['tools']) > 5:
+                        tools_str += f" (+{len(phase['tools']) - 5} mais)"
+                    print(f"     \033[90mFerramentas: {tools_str}\033[0m")
+            print()
+        
+        if skill_data.get('guardrails'):
+            print(f"\033[93m🛡️  Guardrails:\033[0m")
+            guardrails = skill_data['guardrails']
+            
+            if guardrails.get('exploitation'):
+                exp = guardrails['exploitation']
+                print(f"  • Risk Level Máximo: {exp.get('max_risk_level', 'N/A')}")
+                print(f"  • Aprovação Requerida: {'Sim' if exp.get('require_approval') else 'Não'}")
+                
+                if exp.get('forbidden_commands'):
+                    print(f"  • Comandos Proibidos: {', '.join(exp['forbidden_commands'][:3])}")
+            
+            print()
+        
+        if skill_data.get('key_commands'):
+            print(f"\033[92m⚡ Comandos-Chave (exemplos):\033[0m")
+            for category, commands in list(skill_data['key_commands'].items())[:2]:
+                print(f"  \033[96m{category.title()}:\033[0m")
+                for cmd_name, cmd_example in list(commands.items())[:2]:
+                    cmd_short = cmd_example[:60] + "..." if len(cmd_example) > 60 else cmd_example
+                    print(f"    • {cmd_name}: \033[90m{cmd_short}\033[0m")
+            print()
+        
+        if skill_data.get('instructions'):
+            print(f"\033[90m📄 Instruções completas embutidas na skill\033[0m")
+        
+        if skill_data.get('author'):
+            author = skill_data['author']
+            if isinstance(author, dict):
+                print(f"\033[90m👨‍💻 Autor: {author.get('name', 'N/A')}\033[0m")
+            else:
+                print(f"\033[90m👨‍💻 Autor: {author}\033[0m")
+        
+        print(f"\n\033[96m{'='*70}\033[0m")
+        print(f"\n\033[92m✓ Skill '{skill_name}' carregada!\033[0m")
+        print(f"\033[90mAgora você pode pedir: 'Execute pentest usando esta skill'\033[0m\n")
+        
         return "_skip_"
     elif user_input == "/config":
         print(f"\n\033[96m=== CONFIGURAÇÕES ===\033[0m")
@@ -981,24 +1270,61 @@ Retorne um novo JSON com comando não-interativo."""
         # Incrementa contador de comandos executados
         commands_executed += 1
         
-        # Executa o comando com timeout configurável
+        # Executa o comando com timeout configurável e pergunta ao usuário se expirar
         try:
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                text=True, 
-                capture_output=True,
-                executable='/bin/bash',
-                timeout=USER_CONFIG['command_timeout']
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                executable='/bin/bash'
             )
-            output = result.stdout + result.stderr
-            success = result.returncode == 0
-            
-            if not output.strip():
-                output = "[Comando executado com sucesso, sem saída no terminal]"
-        except subprocess.TimeoutExpired:
-            output = f"[⚠ Timeout: Comando excedeu {USER_CONFIG['command_timeout']} segundos]"
+            _result_holder = {'stdout': '', 'stderr': '', 'done': False}
+
+            def _communicate():
+                _result_holder['stdout'], _result_holder['stderr'] = proc.communicate()
+                _result_holder['done'] = True
+
+            _comm_thread = threading.Thread(target=_communicate, daemon=True)
+            _comm_thread.start()
+
+            timeout_val = USER_CONFIG['command_timeout']
+            total_waited = 0
+            output = ""
             success = False
+
+            while True:
+                _comm_thread.join(timeout=timeout_val)
+                total_waited += timeout_val
+
+                if _result_holder['done']:
+                    output = (_result_holder['stdout'] or '') + (_result_holder['stderr'] or '')
+                    success = proc.returncode == 0
+                    if not output.strip():
+                        output = "[Comando executado com sucesso, sem saída no terminal]"
+                    break
+
+                # Timeout atingido — pergunta ao usuário
+                print(f"\n\033[93m⏱ O comando está rodando há {total_waited}s (limite={timeout_val}s).")
+                print(f"   Deseja aguardar mais {timeout_val}s? [S/n]: \033[0m", end='', flush=True)
+                try:
+                    resp = input().strip().lower()
+                except Exception:
+                    resp = 's'
+
+                if resp in ('', 's', 'sim', 'y', 'yes'):
+                    continue
+                else:
+                    proc.kill()
+                    _comm_thread.join(timeout=5)
+                    output = (
+                        f"[⚠ Timeout: O comando ficou {total_waited}s em execução sem concluir. "
+                        f"O usuário optou por encerrar após o timeout de {timeout_val}s.]"
+                    )
+                    success = False
+                    break
+
         except Exception as e:
             output = f"[❌ Erro de execução]: {str(e)}"
             success = False
@@ -1120,17 +1446,23 @@ def chat_loop(first_prompt=""):
     # Habilita modo de paste
     enable_paste_mode()
     
+    # Carrega skills disponíveis
+    skills = list_available_skills()
+    skills_count = len(skills)
+    
     model_source = "💾 carregado do cache" if os.path.exists(MODEL_CONFIG_FILE) else "🆕 padrão"
     
     # Banner com créditos
     print("\033[96m" + "="*60 + "\033[0m")
-    print("\033[96m🤖 OpenAssist - Autonomous Linux AI Assistant\033[0m")
+    print("\033[96m🤖 OpenAssist - Assistente Linux Autônomo com IA\033[0m")
     print("\033[96m" + "="*60 + "\033[0m")
     print(f"\033[90mModelo ativo:\033[0m {active_model} ({model_source})")
     print(f"\033[90mModo:\033[0m ⚡ Um comando por vez (JSON estruturado)")
+    if skills_count > 0:
+        print(f"\033[90mSkills:\033[0m 📚 {skills_count} skills disponíveis (/skills para ver)")
     if allowed_commands:
         print(f"\033[90mWhitelist:\033[0m {len(allowed_commands)} comandos auto-permitidos")
-    print(f"\033[90mComandos:\033[0m /help /clear /exit /status /resetmodel")
+    print(f"\033[90mComandos:\033[0m /help /skills /config /status /exit")
     print("\033[96m" + "="*60 + "\033[0m")
     print(f"\033[90m👨‍💻 Desenvolvido por:\033[0m {AUTHOR_NAME}")
     print(f"\033[90m🔗 LinkedIn:\033[0m {AUTHOR_LINKEDIN}")

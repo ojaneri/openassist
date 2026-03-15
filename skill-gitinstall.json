@@ -1,0 +1,221 @@
+{
+  "name": "gitinstall",
+  "version": "1.0",
+  "description": "Instalação automatizada e segura de software direto de repositórios Git. Detecta tipo de projeto (binário, script, fonte compilável), prepara ambiente, instala dependências, compila se necessário e configura PATH/systemd.",
+  "frameworks": [
+    "Secure Software Installation",
+    "Sandboxing Best Practices",
+    "Linux FHS (Filesystem Hierarchy Standard)"
+  ],
+  "type": "software_installation",
+  "approval_required": false,
+  "max_iterations": 20,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Análise do Repositório",
+      "description": "Clonar repo temporariamente e detectar tipo de projeto",
+      "tools": ["git", "file", "grep"],
+      "outputs": ["repo_analysis_<project>_<date>.json", "detected_type.txt"]
+    },
+    {
+      "id": 2,
+      "name": "Preparação do Ambiente",
+      "description": "Instalar compiladores, interpretadores e dependências necessárias",
+      "tools": ["apt", "cargo", "go", "gcc", "make"],
+      "outputs": ["dependencies_installed_<date>.log", "build_tools_<project>.txt"]
+    },
+    {
+      "id": 3,
+      "name": "Build (se necessário)",
+      "description": "Compilar código fonte para binário executável",
+      "tools": ["make", "cargo build", "go build", "gcc"],
+      "outputs": ["build_log_<project>_<date>.txt", "binary_<project>"]
+    },
+    {
+      "id": 4,
+      "name": "Instalação",
+      "description": "Mover binário/script para local apropriado (/usr/local/bin ou ~/.local/bin)",
+      "tools": ["install", "cp", "chmod"],
+      "outputs": ["install_path_<project>.txt", "install_log_<date>.json"]
+    },
+    {
+      "id": 5,
+      "name": "Configuração",
+      "description": "Adicionar ao PATH, criar systemd service se daemon, configurar permissões",
+      "tools": ["systemctl", "chmod"],
+      "outputs": ["service_file_<project>.service", "path_config.txt"]
+    },
+    {
+      "id": 6,
+      "name": "Verificação",
+      "description": "Testar instalação executando --version ou --help",
+      "outputs": ["verification_<project>_<date>.json", "command_test.log"]
+    }
+  ],
+  "guardrails": {
+    "security": {
+      "clone_to_isolated_dir": true,
+      "inspect_before_execute": true,
+      "run_as_non_root": true,
+      "verify_checksums": false,
+      "scan_for_malware": false,
+      "require_https_git": true
+    },
+    "installation_safety": {
+      "default_install_location": "~/.local/bin",
+      "require_sudo_for_system": true,
+      "backup_existing_binary": true,
+      "create_uninstall_script": true
+    },
+    "build_limits": {
+      "max_build_time": 900,
+      "max_clone_size_mb": 500,
+      "disk_space_required_mb": 1000
+    },
+    "output_formats": {
+      "required": ["json", "log"],
+      "forbidden": ["expose_secrets"]
+    }
+  },
+  "detected_project_types": {
+    "rust": {
+      "detection": ["Cargo.toml", "Cargo.lock"],
+      "build_tool": "cargo",
+      "build_command": "cargo build --release",
+      "binary_location": "target/release/",
+      "install_command": "cargo install --path .",
+      "dependencies": ["cargo", "rustc"]
+    },
+    "go": {
+      "detection": ["go.mod", "go.sum", "main.go"],
+      "build_tool": "go",
+      "build_command": "go build -o <binary_name>",
+      "binary_location": "./",
+      "install_command": "go install",
+      "dependencies": ["golang"]
+    },
+    "c_cpp": {
+      "detection": ["Makefile", "CMakeLists.txt", "configure"],
+      "build_tool": "make",
+      "build_command": "./configure && make",
+      "binary_location": "./",
+      "install_command": "make install",
+      "dependencies": ["build-essential", "gcc", "g++", "make"]
+    },
+    "python": {
+      "detection": ["setup.py", "pyproject.toml", "requirements.txt"],
+      "build_tool": "pip",
+      "build_command": "pip install .",
+      "binary_location": "~/.local/bin/",
+      "install_command": "pip install --user .",
+      "dependencies": ["python3", "python3-pip"]
+    },
+    "nodejs": {
+      "detection": ["package.json"],
+      "build_tool": "npm",
+      "build_command": "npm install && npm run build",
+      "binary_location": "bin/ or dist/",
+      "install_command": "npm install -g .",
+      "dependencies": ["nodejs", "npm"]
+    },
+    "shell_script": {
+      "detection": [".sh files", "#!/bin/bash", "#!/bin/sh"],
+      "build_tool": "none",
+      "build_command": "chmod +x",
+      "binary_location": "./",
+      "install_command": "cp to bin",
+      "dependencies": ["bash"]
+    },
+    "binary_release": {
+      "detection": ["releases/ with binaries", "precompiled"],
+      "build_tool": "none",
+      "build_command": "download and extract",
+      "binary_location": "./",
+      "install_command": "cp to bin",
+      "dependencies": []
+    }
+  },
+  "key_commands": {
+    "analysis": {
+      "clone_temp": "git clone --depth 1 <repo_url> /tmp/gitinstall_<random>",
+      "detect_language": "find /tmp/gitinstall_* -name 'Cargo.toml' -o -name 'go.mod' -o -name 'Makefile' | head -1",
+      "check_size": "du -sh /tmp/gitinstall_* | awk '{print $1}'",
+      "list_files": "ls -la /tmp/gitinstall_*"
+    },
+    "rust_build": {
+      "install_rust": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+      "build_release": "cd <clone_dir> && cargo build --release",
+      "find_binary": "find <clone_dir>/target/release -maxdepth 1 -type f -executable",
+      "install_local": "cargo install --path <clone_dir> --root ~/.local"
+    },
+    "go_build": {
+      "install_go": "sudo apt-get update && sudo apt-get install -y golang",
+      "build": "cd <clone_dir> && go build -o <binary_name>",
+      "install": "cd <clone_dir> && go install"
+    },
+    "c_cpp_build": {
+      "install_deps": "sudo apt-get update && sudo apt-get install -y build-essential gcc g++ make cmake",
+      "configure": "cd <clone_dir> && ./configure --prefix=$HOME/.local",
+      "make": "cd <clone_dir> && make",
+      "install": "cd <clone_dir> && make install"
+    },
+    "python_install": {
+      "install_pip": "sudo apt-get update && sudo apt-get install -y python3-pip",
+      "install_user": "cd <clone_dir> && pip3 install --user .",
+      "install_editable": "cd <clone_dir> && pip3 install --user -e ."
+    },
+    "script_install": {
+      "make_executable": "chmod +x <script_path>",
+      "install_local": "cp <script_path> ~/.local/bin/<script_name>",
+      "install_system": "sudo cp <script_path> /usr/local/bin/<script_name>"
+    },
+    "verification": {
+      "test_command": "<binary_name> --version || <binary_name> --help || <binary_name> -h",
+      "check_path": "which <binary_name>",
+      "verify_executable": "test -x ~/.local/bin/<binary_name> && echo 'OK' || echo 'FAIL'"
+    }
+  },
+  "installation_locations": {
+    "user_local": {
+      "path": "~/.local/bin",
+      "requires_sudo": false,
+      "description": "Instalação pessoal do usuário (recomendado)",
+      "add_to_path": "export PATH=\"$HOME/.local/bin:$PATH\""
+    },
+    "usr_local": {
+      "path": "/usr/local/bin",
+      "requires_sudo": true,
+      "description": "Instalação system-wide (todos os usuários)",
+      "add_to_path": "já está no PATH"
+    },
+    "opt": {
+      "path": "/opt/<app_name>",
+      "requires_sudo": true,
+      "description": "Para aplicações grandes com múltiplos arquivos",
+      "add_to_path": "export PATH=\"/opt/<app_name>/bin:$PATH\""
+    }
+  },
+  "systemd_service_template": {
+    "description": "Template para criar systemd service se for daemon",
+    "path": "/etc/systemd/system/<service_name>.service",
+    "content": "[Unit]\nDescription=<description>\nAfter=network.target\n\n[Service]\nType=simple\nUser=<user>\nExecStart=<binary_path>\nRestart=always\n\n[Install]\nWantedBy=multi-user.target"
+  },
+  "uninstall_script_template": {
+    "description": "Criar script de desinstalação automático",
+    "path": "~/.local/share/gitinstall/uninstall_<app>.sh",
+    "actions": [
+      "rm <binary_path>",
+      "rm -rf <clone_dir>",
+      "systemctl disable <service> (se daemon)"
+    ]
+  },
+  "instructions_file": "SKILL-GITINSTALL.md",
+  "author": {
+    "name": "Osvaldo J. Filho",
+    "linkedin": "linkedin.com/in/ojaneri",
+    "instagram": "instagram.com/peritosegurancadainformacao",
+    "website": "https://perito.digital"
+  },
+  "last_updated": "2026-03-15"
+}
